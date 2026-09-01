@@ -35,6 +35,12 @@ Workflow: `.github/workflows/cicd.yml`
 
 The deploy job depends on every image build, and image builds depend on both quality and security jobs. A failed test or scan therefore cannot reach production. `workflow_dispatch` is the portable manual approval gate for private repositories on plans that do not provide required environment reviewers; supported plans can enforce environment reviewers as an additional gate.
 
+The reference acceptance application deploys `devpilot-web`. That image is
+independently runnable on port `8080` and exposes `/healthz`; the control-plane
+server image intentionally is not used as a standalone target because it needs
+MySQL and Redis. Real installations may report any other independently runnable
+application image while keeping the same immutable-tag contract.
+
 ## GitLab CI
 
 Pipeline: `.gitlab-ci.yml`
@@ -76,6 +82,22 @@ required.
 This is an acceptance environment only. The supported production deployment
 remains Dokploy's installer on a dedicated Linux host with backups, firewall,
 DNS and TLS configured; do not treat the nested lab as a production server.
+
+### Restricted callback tunnel for local acceptance
+
+GitHub-hosted runners cannot call `127.0.0.1`. For a time-bounded local
+acceptance run, expose `deploy/nginx/callback-only.conf` instead of the complete
+DevPilot gateway. The gateway allows `POST` only on
+`/api/cicd/webhooks/<application-code>`, rate-limits requests, caps the request
+body, and returns `404` for the console and every other API. Point a temporary
+Cloudflare Tunnel or equivalent at this gateway, store the resulting absolute
+callback URL as a protected CI environment secret, and stop the tunnel after
+the acceptance run. Account-less quick tunnels have no uptime guarantee and
+must not be treated as the production ingress.
+
+For production, publish the same callback-only route through managed DNS/TLS,
+or restrict it at an existing reverse proxy. CI still signs the exact request
+body; the restricted ingress complements rather than replaces HMAC validation.
 
 Import `deploy/docker-compose.yml` together with `deploy/compose.registry.yml`, then configure:
 

@@ -50,7 +50,10 @@ async function loadApplication(silent = false) {
   if (!selectedId.value) return
   if (!silent) loading.value = true
   errorMessage.value = ''
-  revealedSecret.value = ''
+  // Keep a newly generated one-time secret visible while background polling
+  // refreshes pipeline evidence. It is cleared only when the operator
+  // explicitly switches/reloads the application.
+  if (!silent) revealedSecret.value = ''
   try {
     const [configurationResult, pipelineRuns, deploymentHistory] = await Promise.all([
       cicdApi.configuration(selectedId.value).catch(() => null),

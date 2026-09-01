@@ -138,7 +138,10 @@ jobs:
           CI_PIPELINE_STATUS: ${{ needs.quality.result == 'success' && needs.security.result == 'success' && needs.images.result == 'success' && 'SUCCEEDED' || 'FAILED' }}
           CI_TEST_STATUS: ${{ needs.quality.result == 'success' && 'PASSED' || 'FAILED' }}
           CI_SECURITY_STATUS: ${{ needs.security.result == 'success' && 'PASSED' || 'FAILED' }}
-          CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-server
+          # The acceptance target must be independently runnable by the
+          # deployment provider. The web image exposes /healthz without
+          # requiring the control plane's MySQL and Redis dependencies.
+          CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-web
           CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CI_SUMMARY: GitHub Actions quality, security and image gates
         run: |

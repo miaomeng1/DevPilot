@@ -9,6 +9,7 @@ required_files=(
   .gitlab-ci.yml
   .woodpecker/cicd.yaml
   deploy/compose.registry.yml
+  deploy/nginx/callback-only.conf
   scripts/cicd/notify-devpilot.sh
   scripts/backup.sh
   scripts/restore.sh
@@ -22,11 +23,14 @@ done
 grep -q 'needs: \[quality, security\]' .github/workflows/cicd.yml
 grep -q 'needs: \[quality, security, images\]' .github/workflows/cicd.yml
 grep -q 'sha-${GITHUB_SHA::12}' .github/workflows/cicd.yml
+grep -Fq 'CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-web' .github/workflows/cicd.yml
 grep -q 'needs: \[server-test, web-test, agent-test, security-gate\]' .gitlab-ci.yml
 grep -q 'DEVPILOT_IMAGE_TAG is required' deploy/compose.registry.yml
 grep -q 'X-DevPilot-Signature: sha256=' scripts/cicd/notify-devpilot.sh
 grep -q 'single-transaction' scripts/backup.sh
 grep -q 'DEV_PILOT_MASTER_KEY does not match' scripts/restore.sh
+grep -q 'limit_except POST' deploy/nginx/callback-only.conf
+grep -q 'return 404' deploy/nginx/callback-only.conf
 bash -n scripts/cicd/notify-devpilot.sh scripts/install.sh scripts/install-agent.sh \
   scripts/upgrade.sh scripts/uninstall.sh scripts/backup.sh scripts/restore.sh scripts/test-maintenance.sh
 
