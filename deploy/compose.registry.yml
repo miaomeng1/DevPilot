@@ -1,0 +1,16 @@
+name: devpilot
+
+# Production overlay: deploy pre-tested immutable images from a registry.
+# Usage:
+#   docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/compose.registry.yml up -d
+services:
+  devpilot-server:
+    image: ${DEVPILOT_IMAGE_PREFIX:?DEVPILOT_IMAGE_PREFIX is required}-server:${DEVPILOT_IMAGE_TAG:?DEVPILOT_IMAGE_TAG is required}
+    pull_policy: always
+    build: null
+
+  devpilot-web:
+    image: ${DEVPILOT_IMAGE_PREFIX:?DEVPILOT_IMAGE_PREFIX is required}-web:${DEVPILOT_IMAGE_TAG:?DEVPILOT_IMAGE_TAG is required}
+    pull_policy: always
+    build: null
+

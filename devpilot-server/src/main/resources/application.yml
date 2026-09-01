@@ -1,0 +1,67 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: devpilot-server
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/devpilot?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}
+    username: ${DB_USERNAME:devpilot}
+    password: ${DB_PASSWORD:devpilot}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}
+      minimum-idle: 2
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  jackson:
+    default-property-inclusion: always
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: assign_id
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.devpilot: INFO
+
+devpilot:
+  security:
+    jwt-secret: ${JWT_SECRET}
+    access-token-ttl: ${ACCESS_TOKEN_TTL:2h}
+    refresh-token-ttl: ${REFRESH_TOKEN_TTL:7d}
+    refresh-cookie-secure: ${AUTH_COOKIE_SECURE:false}
+    refresh-cookie-name: dp_refresh_token
+    settings-encryption-key: ${DEV_PILOT_MASTER_KEY}
+  agent:
+    heartbeat-interval: ${AGENT_HEARTBEAT_INTERVAL:10s}
+    heartbeat-timeout: ${AGENT_HEARTBEAT_TIMEOUT:30s}
+    public-url: ${DEV_PILOT_PUBLIC_URL:http://localhost:8080}

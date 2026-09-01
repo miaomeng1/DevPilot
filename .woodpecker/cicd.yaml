@@ -1,0 +1,100 @@
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  server-test:
+    image: maven:3.9-eclipse-temurin-21
+    commands:
+      - cd devpilot-server && mvn -B test
+
+  web-test:
+    image: node:22-alpine
+    commands:
+      - cd devpilot-web && npm ci && npm run type-check && npm run build
+
+  agent-test:
+    image: golang:1.25-alpine
+    commands:
+      - cd devpilot-agent && go test -race ./...
+
+  security-gate:
+    image: aquasec/trivy:0.65.0
+    commands:
+      - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed .
+
+  build-server:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      registry:
+        from_secret: registry
+      repo:
+        from_secret: registry_server_repository
+      tags: sha-${CI_COMMIT_SHA:0:12}
+      dockerfile: devpilot-server/Dockerfile
+      context: devpilot-server
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+    when:
+      - event: [push, tag]
+
+  build-web:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      registry:
+        from_secret: registry
+      repo:
+        from_secret: registry_web_repository
+      tags: sha-${CI_COMMIT_SHA:0:12}
+      dockerfile: devpilot-web/Dockerfile
+      context: .
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+    when:
+      - event: [push, tag]
+
+  build-agent:
+    image: woodpeckerci/plugin-docker-buildx
+    privileged: true
+    settings:
+      registry:
+        from_secret: registry
+      repo:
+        from_secret: registry_agent_repository
+      tags: sha-${CI_COMMIT_SHA:0:12}
+      dockerfile: devpilot-agent/Dockerfile
+      context: devpilot-agent
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+    when:
+      - event: [push, tag]
+
+  deploy:
+    image: alpine:3.22
+    commands:
+      - apk add --no-cache bash curl jq openssl
+      - export CI_EXTERNAL_RUN_ID="woodpecker-$CI_PIPELINE_NUMBER"
+      - export CI_COMMIT_SHA="$CI_COMMIT_SHA"
+      - export CI_BRANCH="$CI_COMMIT_BRANCH"
+      - export CI_PIPELINE_STATUS=SUCCEEDED CI_TEST_STATUS=PASSED CI_SECURITY_STATUS=PASSED
+      - export CI_IMAGE_URI="$REGISTRY_SERVER_REPOSITORY:sha-${CI_COMMIT_SHA:0:12}"
+      - export CI_RUN_URL="$CI_PIPELINE_URL"
+      - export CI_SUMMARY='Woodpecker quality, security and image gates'
+      - bash scripts/cicd/notify-devpilot.sh
+    environment:
+      DEVPILOT_CICD_CALLBACK_URL:
+        from_secret: devpilot_cicd_callback_url
+      DEVPILOT_CICD_CALLBACK_SECRET:
+        from_secret: devpilot_cicd_callback_secret
+      REGISTRY_SERVER_REPOSITORY:
+        from_secret: registry_server_repository
+    when:
+      - event: push
+        branch: [main, master]

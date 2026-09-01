@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+.vscode/
+.env
+*.log
+
+devpilot-server/target/
+devpilot-web/node_modules/
+devpilot-web/dist/
+devpilot-agent/bin/
+devpilot-agent/coverage.out
+
+deploy/data/
+

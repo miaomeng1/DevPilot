@@ -1,0 +1,80 @@
+stages: [test, security, build, deploy]
+
+variables:
+  MAVEN_OPTS: -Dmaven.repo.local=.m2/repository
+  IMAGE_PREFIX: $CI_REGISTRY_IMAGE/devpilot
+  IMAGE_TAG: sha-$CI_COMMIT_SHORT_SHA
+  TRIVY_VERSION: '0.65.0'
+
+cache:
+  paths:
+    - .m2/repository
+    - devpilot-web/.npm
+    - devpilot-agent/.cache/go-build
+
+server-test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  script: [cd devpilot-server, mvn -B test]
+
+web-test:
+  stage: test
+  image: node:22-alpine
+  script:
+    - cd devpilot-web
+    - npm ci --cache .npm --prefer-offline
+    - npm run type-check
+    - npm run build
+
+agent-test:
+  stage: test
+  image: golang:1.25-alpine
+  script:
+    - cd devpilot-agent
+    - go test -race ./...
+
+security-gate:
+  stage: security
+  image:
+    name: aquasec/trivy:0.65.0
+    entrypoint: ['']
+  script:
+    - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed .
+
+build-images:
+  stage: build
+  image: docker:28-cli
+  services: ['docker:28-dind']
+  needs: [server-test, web-test, agent-test, security-gate]
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$IMAGE_PREFIX-server:$IMAGE_TAG" devpilot-server
+    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" --build-arg "VERSION=$IMAGE_TAG" --build-arg "COMMIT=$CI_COMMIT_SHA" -t "$IMAGE_PREFIX-web:$IMAGE_TAG" -f devpilot-web/Dockerfile .
+    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" --build-arg "VERSION=$IMAGE_TAG" --build-arg "COMMIT=$CI_COMMIT_SHA" -t "$IMAGE_PREFIX-agent:$IMAGE_TAG" devpilot-agent
+    - docker push "$IMAGE_PREFIX-server:$IMAGE_TAG"
+    - docker push "$IMAGE_PREFIX-web:$IMAGE_TAG"
+    - docker push "$IMAGE_PREFIX-agent:$IMAGE_TAG"
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+deploy-production:
+  stage: deploy
+  image: alpine:3.22
+  needs: [build-images]
+  environment:
+    name: production
+  script:
+    - apk add --no-cache bash curl jq openssl
+    - export CI_EXTERNAL_RUN_ID="gitlab-$CI_PIPELINE_ID"
+    - export CI_COMMIT_SHA="$CI_COMMIT_SHA"
+    - export CI_BRANCH="$CI_COMMIT_REF_NAME"
+    - export CI_PIPELINE_STATUS=SUCCEEDED CI_TEST_STATUS=PASSED CI_SECURITY_STATUS=PASSED
+    - export CI_IMAGE_URI="$IMAGE_PREFIX-server:$IMAGE_TAG"
+    - export CI_RUN_URL="$CI_PIPELINE_URL"
+    - export CI_SUMMARY='GitLab CI quality, security and image gates'
+    - bash scripts/cicd/notify-devpilot.sh
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual

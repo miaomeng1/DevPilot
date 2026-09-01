@@ -1,0 +1,13 @@
+server:
+  url: https://ops.example.com
+
+agent:
+  token: dp_agent_replace_with_the_generated_token
+
+collect:
+  interval: 10
+
+nginx:
+  enabled: true
+  configPath: /etc/nginx/conf.d
+
