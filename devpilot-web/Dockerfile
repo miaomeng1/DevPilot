@@ -29,4 +29,7 @@ COPY --from=agent-build /out /usr/share/nginx/html/downloads
 COPY scripts/install.sh /usr/share/nginx/html/install.sh
 COPY scripts/install-agent.sh /usr/share/nginx/html/install-agent.sh
 COPY scripts/upgrade.sh scripts/uninstall.sh scripts/backup.sh scripts/restore.sh /usr/share/nginx/html/tools/
-EXPOSE 80
+RUN chown -R nginx:nginx /var/cache/nginx /var/run /etc/nginx/conf.d /usr/share/nginx/html && \
+    touch /var/run/nginx.pid && chown nginx:nginx /var/run/nginx.pid
+USER nginx
+EXPOSE 8080

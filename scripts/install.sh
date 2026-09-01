@@ -137,7 +137,7 @@ services:
   devpilot-web:
     image: ${DEVPILOT_WEB_IMAGE}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep ok"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -163,7 +163,7 @@ EOF
 cat >"$INSTALL_DIR/nginx/default.conf" <<'EOF'
 map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 upstream devpilot_server { server devpilot-server:8080; keepalive 32; }
-upstream devpilot_web { server devpilot-web:80; keepalive 16; }
+upstream devpilot_web { server devpilot-web:8080; keepalive 16; }
 server {
   listen 80;
   server_name _;
