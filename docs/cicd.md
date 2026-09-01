@@ -21,7 +21,7 @@ The deployment host never builds application source in this mode. It pulls image
 Workflow: `.github/workflows/cicd.yml`
 
 1. Enable GitHub Actions and Packages for the repository.
-2. Create a protected `production` environment. Add required reviewers for manual approval if appropriate.
+2. Create a protected `production` environment. Add required reviewers when the repository plan supports them.
 3. In DevPilot, configure the application's repository, protected branch, deployment provider API and resource ID. Copy the one-time callback secret.
 4. Add these protected environment secrets:
    - `DEVPILOT_CICD_CALLBACK_URL` — the absolute DevPilot `/api/cicd/webhooks/<application-code>` URL.
@@ -30,9 +30,10 @@ Workflow: `.github/workflows/cicd.yml`
    - `ghcr.io/<owner>/devpilot-server`
    - `ghcr.io/<owner>/devpilot-web`
    - `ghcr.io/<owner>/devpilot-agent`
-6. Push to `main` or `master`. Pull requests build but never publish or deploy.
+6. Push to `main` or `master`. Pull requests build but never publish or deploy. A normal protected-branch push publishes the immutable images but does not deploy them.
+7. For production, select **Actions → DevPilot CI/CD → Run workflow** on the protected branch. This explicit operator action reruns every gate and sends the signed deployment callback only if they all pass.
 
-The deploy job depends on every image build, and image builds depend on both quality and security jobs. A failed test or scan therefore cannot reach production.
+The deploy job depends on every image build, and image builds depend on both quality and security jobs. A failed test or scan therefore cannot reach production. `workflow_dispatch` is the portable manual approval gate for private repositories on plans that do not provide required environment reviewers; supported plans can enforce environment reviewers as an additional gate.
 
 ## GitLab CI
 

@@ -114,24 +114,24 @@ jobs:
   report-and-deploy:
     name: Report gates and request deployment
     needs: [quality, security, images]
-    if: always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    # workflow_dispatch is the explicit human production approval gate. Plans
+    # that support environment reviewers can enforce a second approval here.
+    if: always() && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-24.04
     environment: production
+    env:
+      DEVPILOT_CICD_CALLBACK_URL: ${{ secrets.DEVPILOT_CICD_CALLBACK_URL }}
+      DEVPILOT_CICD_CALLBACK_SECRET: ${{ secrets.DEVPILOT_CICD_CALLBACK_SECRET }}
     steps:
       - uses: actions/checkout@v5
       - name: Install callback dependencies
         run: sudo apt-get update && sudo apt-get install -y jq openssl
       - name: DevPilot callback is not configured
         if: env.DEVPILOT_CICD_CALLBACK_URL == '' || env.DEVPILOT_CICD_CALLBACK_SECRET == ''
-        env:
-          DEVPILOT_CICD_CALLBACK_URL: ${{ secrets.DEVPILOT_CICD_CALLBACK_URL }}
-          DEVPILOT_CICD_CALLBACK_SECRET: ${{ secrets.DEVPILOT_CICD_CALLBACK_SECRET }}
         run: echo "Skipping DevPilot callback until both protected environment secrets are configured."
       - name: Report result to DevPilot
         if: env.DEVPILOT_CICD_CALLBACK_URL != '' && env.DEVPILOT_CICD_CALLBACK_SECRET != ''
         env:
-          DEVPILOT_CICD_CALLBACK_URL: ${{ secrets.DEVPILOT_CICD_CALLBACK_URL }}
-          DEVPILOT_CICD_CALLBACK_SECRET: ${{ secrets.DEVPILOT_CICD_CALLBACK_SECRET }}
           CI_EXTERNAL_RUN_ID: github-${{ github.run_id }}-${{ github.run_attempt }}
           CI_COMMIT_SHA: ${{ github.sha }}
           CI_BRANCH: ${{ github.ref_name }}
