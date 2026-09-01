@@ -56,6 +56,27 @@ The recommended `API · exact image` mode needs the provider base URL, a minimum
 
 Webhook mode remains available for installations where the provider owns image selection. It cannot provide the same exact-image guarantee, so API mode is preferred.
 
+### Isolated local Dokploy acceptance lab
+
+For local end-to-end acceptance on a Docker workstation, run:
+
+```bash
+make dokploy-lab-start
+make dokploy-lab-status
+```
+
+The panel is exposed at `http://127.0.0.1:19000`. This lab runs an isolated
+Docker-in-Docker Swarm so it does not change the workstation's own Swarm state.
+Its generated Postgres and authentication secrets live only in Docker Secrets.
+Use `make dokploy-lab-stop` to stop it while preserving its volumes and secrets.
+The pinned image is reused after the first successful download; set
+`DEVPILOT_DOKPLOY_REFRESH=true` only when an explicit registry refresh is
+required.
+
+This is an acceptance environment only. The supported production deployment
+remains Dokploy's installer on a dedicated Linux host with backups, firewall,
+DNS and TLS configured; do not treat the nested lab as a production server.
+
 Import `deploy/docker-compose.yml` together with `deploy/compose.registry.yml`, then configure:
 
 ```dotenv

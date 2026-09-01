@@ -1,4 +1,4 @@
-.PHONY: test build web agent server compose-config cicd-verify maintenance-verify
+.PHONY: test build web agent server compose-config cicd-verify maintenance-verify dokploy-lab-start dokploy-lab-status dokploy-lab-stop
 
 test:
 	cd devpilot-server && mvn test
@@ -24,3 +24,12 @@ cicd-verify:
 
 maintenance-verify:
 	docker run --rm -v "$(CURDIR):/repo:ro" maven:3.9-eclipse-temurin-21 bash /repo/scripts/test-maintenance.sh
+
+dokploy-lab-start:
+	bash scripts/dokploy-lab.sh start
+
+dokploy-lab-status:
+	bash scripts/dokploy-lab.sh status
+
+dokploy-lab-stop:
+	bash scripts/dokploy-lab.sh stop
