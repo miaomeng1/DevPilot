@@ -19,6 +19,9 @@ import com.devpilot.server.exception.BusinessException;
 import com.devpilot.server.node.dto.ServerNodeResponse;
 import com.devpilot.server.node.service.ServerNodeService;
 import com.devpilot.server.security.DevPilotPrincipal;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.LocalDate;
@@ -36,11 +39,13 @@ public class ApplicationService {
 
     private static final int HEALTH_INTERVAL_SECONDS = 30;
     private static final int HEALTH_CLAIM_TIMEOUT_SECONDS = 20;
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private final ApplicationMapper applicationMapper;
     private final ApplicationDeploymentMapper deploymentMapper;
     private final DockerContainerSnapshotMapper containerMapper;
     private final ServerNodeService serverNodeService;
     private final UserMapper userMapper;
+    private final ObjectMapper objectMapper;
 
     public List<ApplicationResponse> list() {
         return applicationMapper.selectAll().stream().map(this::toResponse).toList();
@@ -224,6 +229,8 @@ public class ApplicationService {
                 entity.getEnvironment(), entity.getServerId(), server.name(), entity.getDeployType(),
                 entity.getContainerSnapshotId(), container == null ? null : container.getContainerId(),
                 container == null ? null : container.getName(), container == null ? null : container.getImage(),
+                container == null ? null : container.getIpAddress(),
+                container == null ? List.of() : fromJson(container.getPortsJson()),
                 entity.getCurrentVersion(), entity.getAccessUrl(), entity.getHealthCheckUrl(), status,
                 entity.getHealthStatus(), entity.getHealthMessage(), entity.getHealthCheckedAt(),
                 container == null ? null : container.getCpuUsage(),
@@ -251,6 +258,17 @@ public class ApplicationService {
             return "unhealthy".equalsIgnoreCase(container.getHealth()) ? "WARNING" : "RUNNING";
         }
         return "dead".equalsIgnoreCase(container.getState()) ? "ERROR" : "OFFLINE";
+    }
+
+    private List<String> fromJson(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(value, STRING_LIST);
+        } catch (JsonProcessingException exception) {
+            return List.of();
+        }
     }
 
     private static void validateUrl(String value, String label) {

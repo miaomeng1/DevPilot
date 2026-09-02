@@ -28,22 +28,22 @@ const initials = computed(() => {
 })
 
 const navigation = computed(() => [
-  { label: 'Dashboard', code: 'DB', to: '/' },
-  { label: 'Servers', code: 'SV', to: '/servers' },
+  { label: '概览 Dashboard', code: 'DB', to: '/' },
+  { label: '服务器 Servers', code: 'SV', to: '/servers' },
   { label: 'Docker', code: 'DK', to: '/docker' },
-  { label: 'Applications', code: 'AP', to: '/applications' },
-  { label: 'CI/CD', code: 'CI', to: '/cicd' },
+  { label: '应用 Applications', code: 'AP', to: '/applications' },
+  { label: '发布 CI/CD', code: 'CI', to: '/cicd' },
   { label: 'Nginx', code: 'NX', to: '/nginx' },
-  { label: 'Monitor', code: 'MN', to: '/monitor' },
-  { label: 'Alerts', code: 'AL', to: '/alerts' },
-  { label: 'Audit', code: 'AU', to: '/audit', adminOnly: true },
-  { label: 'Settings', code: 'ST', to: '/settings', adminOnly: true },
+  { label: '监控 Monitor', code: 'MN', to: '/monitor' },
+  { label: '告警 Alerts', code: 'AL', to: '/alerts' },
+  { label: '审计 Audit', code: 'AU', to: '/audit', adminOnly: true },
+  { label: '设置 Settings', code: 'ST', to: '/settings', adminOnly: true },
 ].filter((item) => !item.adminOnly || auth.hasAnyRole(['ADMIN'])))
 
 const commandItems = computed(() => [
-  ...navigation.value.map(({ label, to }) => ({ label, to, detail: 'Workspace' })),
-  { label: 'Alert rules', to: '/alerts/rules', detail: 'Policies and webhooks' },
-  ...(auth.hasAnyRole(['ADMIN']) ? [{ label: 'User management', to: '/settings/users', detail: 'Accounts and roles' }] : []),
+  ...navigation.value.map(({ label, to }) => ({ label, to, detail: '工作台 Workspace' })),
+  { label: '告警规则 Alert rules', to: '/alerts/rules', detail: '策略与 Webhooks' },
+  ...(auth.hasAnyRole(['ADMIN']) ? [{ label: '用户管理 Users', to: '/settings/users', detail: '账号与角色' }] : []),
 ])
 
 const matchingCommands = computed(() => {
@@ -125,12 +125,12 @@ onBeforeUnmount(() => {
       <RouterLink class="console-brand" to="/">
         <img v-if="system.settings.logoUrl" class="custom-logo compact-logo" :src="system.settings.logoUrl" alt="" />
         <div v-else class="brand-symbol compact"><i /><i /><i /></div>
-        <div><strong>{{ system.settings.systemName }}</strong><small>Cloud Console</small></div>
+        <div><strong>{{ system.settings.systemName }}</strong><small>云控制台 Cloud Console</small></div>
       </RouterLink>
       <button class="mobile-sidebar-close" type="button" aria-label="Close navigation" @click="mobileNavOpen = false">×</button>
 
       <nav class="console-nav" aria-label="Primary navigation">
-        <p>Workspace</p>
+        <p>工作台 Workspace</p>
         <RouterLink
           v-for="item in navigation"
           :key="item.label"
@@ -143,18 +143,18 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="sidebar-foot">
-        <span class="control-health"><i />Control plane</span>
-        <small>v1.0.0 · Control plane</small>
+        <span class="control-health"><i />控制面 Control plane</span>
+        <small>v1.0.0 · 控制面</small>
       </div>
     </aside>
 
     <section class="console-main">
       <header class="console-topbar">
         <div class="command-search-wrap" @focusout="commandOpen = false">
-          <div class="command-search"><span>⌕</span><input ref="commandInput" v-model="commandQuery" role="combobox" aria-label="Jump to a page" aria-controls="command-results" :aria-expanded="commandOpen" placeholder="Jump to a page…" @focus="commandOpen = true" @keydown.enter.prevent="runCommand()" @keydown.escape="commandOpen = false; commandInput?.blur()" /><kbd>⌘ K</kbd></div>
+          <div class="command-search"><span>⌕</span><input ref="commandInput" v-model="commandQuery" role="combobox" aria-label="跳转页面" aria-controls="command-results" :aria-expanded="commandOpen" placeholder="搜索或跳转 Search…" @focus="commandOpen = true" @keydown.enter.prevent="runCommand()" @keydown.escape="commandOpen = false; commandInput?.blur()" /><kbd>⌘ K</kbd></div>
           <div v-if="commandOpen" id="command-results" class="command-results" role="listbox">
             <button v-for="item in matchingCommands" :key="item.to" type="button" role="option" @mousedown.prevent @click="runCommand(item.to)"><span>{{ item.label }}</span><small>{{ item.detail }}</small></button>
-            <p v-if="!matchingCommands.length">No matching page</p>
+            <p v-if="!matchingCommands.length">没有匹配页面 No results</p>
           </div>
         </div>
         <div class="top-actions">

@@ -17,6 +17,8 @@ export interface Application {
   containerId: string | null
   containerName: string | null
   dockerImage: string | null
+  containerIpAddress: string | null
+  ports: string[]
   currentVersion: string | null
   accessUrl: string | null
   healthCheckUrl: string | null

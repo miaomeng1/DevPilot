@@ -1,6 +1,7 @@
 package com.devpilot.server.application.dto;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 public record ApplicationResponse(
         Long id,
@@ -15,6 +16,8 @@ public record ApplicationResponse(
         String containerId,
         String containerName,
         String dockerImage,
+        String containerIpAddress,
+        List<String> ports,
         String currentVersion,
         String accessUrl,
         String healthCheckUrl,

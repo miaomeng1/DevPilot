@@ -61,7 +61,7 @@ const router = createRouter({
           path: 'cicd',
           name: 'cicd',
           component: () => import('@/views/CicdView.vue'),
-          meta: { title: 'CI/CD' },
+          meta: { title: '发布中心 CI/CD' },
         },
         {
           path: 'nginx',

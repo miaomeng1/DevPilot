@@ -141,32 +141,33 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
   <section class="application-detail-view">
     <div v-if="loading && !application" class="table-empty"><span class="loading-ring" /><strong>Loading application</strong></div>
     <template v-else-if="application">
-      <RouterLink class="back-link" to="/applications">← Application catalog</RouterLink>
+      <RouterLink class="back-link" to="/applications">← 返回应用工作台</RouterLink>
       <header class="page-heading application-detail-heading">
         <div><p class="eyebrow">{{ application.environment }} · {{ application.code }}</p><h1>{{ application.name }}</h1><span>{{ application.description || application.dockerImage || 'Docker application' }}</span></div>
-        <div class="application-actions"><span class="status-badge" :class="statusClass(application.status)"><i />{{ application.status }}</span><button v-if="canManage" @click="openRelease">＋ Record release</button><button v-if="canManage" @click="openEdit">Edit</button><button v-if="canDelete" class="danger-action" @click="deleteConfirmation = ''; deleteOpen = true">Delete</button></div>
+        <div class="application-actions"><span class="status-badge" :class="statusClass(application.status)"><i />{{ application.status }}</span><RouterLink class="application-cicd-link" to="/cicd">发布中心 CI/CD</RouterLink><button v-if="canManage" @click="openEdit">编辑</button><button v-if="canManage" @click="openRelease">手工记录</button><button v-if="canDelete" class="danger-action" @click="deleteConfirmation = ''; deleteOpen = true">删除</button></div>
       </header>
       <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
 
       <div class="application-kpis">
-        <article><span>Health</span><strong :class="`health-${application.healthStatus.toLowerCase()}`">{{ application.healthStatus }}</strong><small>{{ application.healthMessage || 'Awaiting Agent probe' }}</small></article>
-        <article><span>Current version</span><strong>{{ application.currentVersion || 'Unversioned' }}</strong><small>{{ application.dockerImage || 'Image unavailable' }}</small></article>
-        <article><span>CPU usage</span><strong>{{ application.cpuUsage === null ? '—' : `${application.cpuUsage.toFixed(1)}%` }}</strong><small>Current container sample</small></article>
-        <article><span>Memory</span><strong>{{ bytes(application.memoryUsage) }}</strong><small>Limit {{ bytes(application.memoryLimit) }}</small></article>
+        <article><span>健康 Health</span><strong :class="`health-${application.healthStatus.toLowerCase()}`">{{ application.healthStatus }}</strong><small>{{ application.healthMessage || '等待 Agent 探测' }}</small></article>
+        <article><span>当前版本 Version</span><strong>{{ application.currentVersion || '未标记' }}</strong><small>{{ application.dockerImage || '镜像不可用' }}</small></article>
+        <article><span>CPU 使用率</span><strong>{{ application.cpuUsage === null ? '—' : `${application.cpuUsage.toFixed(1)}%` }}</strong><small>当前容器采样</small></article>
+        <article><span>内存 Memory</span><strong>{{ bytes(application.memoryUsage) }}</strong><small>限制 {{ bytes(application.memoryLimit) }}</small></article>
       </div>
 
       <div class="application-detail-grid">
-        <article class="detail-panel application-facts"><header><div><strong>Service identity</strong><small>Stable application metadata and runtime binding</small></div><span>DOCKER</span></header><dl>
-          <div><dt>Server</dt><dd><RouterLink :to="`/servers/${application.serverId}`">{{ application.serverName }}</RouterLink></dd></div>
-          <div><dt>Container</dt><dd><RouterLink v-if="application.containerSnapshotId" :to="`/docker/containers/${application.containerSnapshotId}`">{{ application.containerName }}</RouterLink><span v-else>Unavailable</span></dd></div>
-          <div><dt>Environment</dt><dd>{{ application.environment }}</dd></div><div><dt>Deploy type</dt><dd>{{ application.deployType }}</dd></div>
-          <div class="wide"><dt>Access URL</dt><dd><a v-if="application.accessUrl" :href="application.accessUrl" target="_blank" rel="noopener">{{ application.accessUrl }} ↗</a><span v-else>Not configured</span></dd></div>
-          <div class="wide"><dt>Health check</dt><dd>{{ application.healthCheckUrl || 'Not configured' }}</dd></div>
-          <div><dt>Last health check</dt><dd>{{ formatTime(application.healthCheckedAt) }}</dd></div><div><dt>Last release</dt><dd>{{ formatTime(application.lastDeployedAt) }}</dd></div>
+        <article class="detail-panel application-facts"><header><div><strong>服务与运行时 Service runtime</strong><small>镜像、容器、网络入口和健康检查关联</small></div><span>DOCKER</span></header><dl>
+          <div><dt>服务器 Server</dt><dd><RouterLink :to="`/servers/${application.serverId}`">{{ application.serverName }}</RouterLink></dd></div>
+          <div><dt>容器 Container</dt><dd><RouterLink v-if="application.containerSnapshotId" :to="`/docker/containers/${application.containerSnapshotId}`">{{ application.containerName }}</RouterLink><span v-else>不可用</span></dd></div>
+          <div><dt>环境 Environment</dt><dd>{{ application.environment }}</dd></div><div><dt>容器 IP</dt><dd>{{ application.containerIpAddress || '—' }}</dd></div>
+          <div class="wide"><dt>运行端口 Ports</dt><dd class="application-port-list"><code v-for="port in application.ports" :key="port">{{ port }}</code><span v-if="!application.ports.length">未发现公开端口</span></dd></div>
+          <div class="wide"><dt>访问地址 Access URL</dt><dd><a v-if="application.accessUrl" :href="application.accessUrl" target="_blank" rel="noopener">{{ application.accessUrl }} ↗</a><span v-else>未配置</span></dd></div>
+          <div class="wide"><dt>健康检查 Health check</dt><dd>{{ application.healthCheckUrl || '未配置' }}</dd></div>
+          <div><dt>最近健康检查</dt><dd>{{ formatTime(application.healthCheckedAt) }}</dd></div><div><dt>最近发布</dt><dd>{{ formatTime(application.lastDeployedAt) }}</dd></div>
         </dl></article>
 
-        <article class="detail-panel release-panel"><header><div><strong>Release history</strong><small>Version, image, operator, result, and retained notes</small></div><span>{{ deployments.length }} records</span></header>
-          <div v-if="!deployments.length" class="release-empty"><span>⇧</span><strong>No release records</strong><small>Record completed external deployments here; deployment automation belongs to the V2 roadmap.</small></div>
+        <article class="detail-panel release-panel"><header><div><strong>发布记录 Release history</strong><small>版本、镜像、执行人、结果与日志</small></div><span>{{ deployments.length }} 条</span></header>
+          <div v-if="!deployments.length" class="release-empty"><span>⇧</span><strong>暂无发布记录</strong><small>自动发布记录会由 CI/CD 发布中心生成。</small></div>
           <ol v-else class="release-list"><li v-for="deployment in deployments" :key="deployment.id"><span class="release-dot" :class="deployment.result.toLowerCase()" /><div class="release-main"><header><strong>{{ deployment.version }}</strong><span class="status-badge" :class="statusClass(deployment.result)"><i />{{ deployment.result }}</span></header><code>{{ deployment.dockerImage }}</code><p v-if="deployment.logs">{{ deployment.logs }}</p><small>{{ deployment.operatorName }} · {{ deployment.serverName }} · {{ formatTime(deployment.deployedAt) }}</small></div></li></ol>
         </article>
       </div>
