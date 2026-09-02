@@ -11,6 +11,7 @@ import com.devpilot.server.cicd.entity.CicdPipelineRunEntity;
 import com.devpilot.server.cicd.mapper.CicdConfigurationMapper;
 import com.devpilot.server.cicd.mapper.CicdDeploymentMapper;
 import com.devpilot.server.cicd.mapper.CicdPipelineRunMapper;
+import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
 import com.devpilot.server.exception.BusinessException;
 import com.devpilot.server.security.DevPilotPrincipal;
 import com.devpilot.server.security.SensitiveSettingCipher;
@@ -81,8 +82,36 @@ public class CicdDeploymentService {
             ApplicationEntity application = applicationMapper.selectById(deployment.getApplicationId());
             if (application == null) continue;
             refreshProviderLogs(deployment);
+            CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(deployment.getApplicationId());
+            if (configuration != null && "API".equals(valueOr(configuration.getDeploymentMode(), "WEBHOOK"))
+                    && "DOKPLOY".equals(configuration.getDeploymentProvider())) {
+                DeploymentState providerState = providerClient.fetchDeploymentState(
+                        configuration.getDeploymentProvider(), decrypt(configuration.getProviderBaseUrlCipher()),
+                        decrypt(configuration.getProviderApiTokenCipher()), configuration.getProviderResourceId(),
+                        deployment.getProviderDeploymentId());
+                if (providerState == DeploymentState.FAILED) {
+                    markUnhealthyAndRollback(deployment, application, timestamp, "Deployment provider reported FAILED");
+                    continue;
+                }
+                if (providerState != DeploymentState.SUCCEEDED) {
+                    if (!timestamp.isBefore(deployment.getHealthDeadlineAt())) {
+                        markUnhealthyAndRollback(deployment, application, timestamp,
+                                "Deployment provider did not complete before the health deadline");
+                    }
+                    continue;
+                }
+                if ("TRIGGERED".equals(deployment.getStatus())) {
+                    deployment.setStatus("VERIFYING");
+                    deployment.setUpdatedAt(timestamp);
+                    deployment.setLogs(append(deployment.getLogs(),
+                            "Deployment provider completed; waiting for a fresh Agent health probe"));
+                    deploymentMapper.updateById(deployment);
+                    continue;
+                }
+            }
             boolean freshProbe = application.getHealthCheckedAt() != null
-                    && application.getHealthCheckedAt().isAfter(deployment.getStartedAt().plusSeconds(HEALTH_STABILIZATION_SECONDS));
+                    && application.getHealthCheckedAt().isAfter("VERIFYING".equals(deployment.getStatus())
+                    ? deployment.getUpdatedAt() : deployment.getStartedAt().plusSeconds(HEALTH_STABILIZATION_SECONDS));
             if (freshProbe && "HEALTHY".equals(application.getHealthStatus())) {
                 markHealthy(deployment, application, timestamp);
             } else if ((freshProbe && "UNHEALTHY".equals(application.getHealthStatus()))
@@ -103,7 +132,6 @@ public class CicdDeploymentService {
             if (providerLogs != null && !providerLogs.isBlank()) {
                 deployment.setLogs(truncate("Deployment accepted by " + configuration.getDeploymentProvider()
                         + "\n--- Provider logs ---\n" + providerLogs, 48000));
-                deployment.setUpdatedAt(now());
                 deploymentMapper.updateById(deployment);
             }
         } catch (IllegalStateException ignored) {

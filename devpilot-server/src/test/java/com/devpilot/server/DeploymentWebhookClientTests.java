@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.devpilot.server.cicd.service.DeploymentWebhookClient;
+import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -73,6 +74,9 @@ class DeploymentWebhookClientTests {
         assertEquals("dokploy build output", client.fetchLogs("DOKPLOY", baseUrl, "dokploy-token",
                 "app-42", id));
         assertEquals("/api/deployment.readLogs?deploymentId=dokploy-deploy-1&tail=10000", requests.get(2).path());
+        assertEquals(DeploymentState.SUCCEEDED, client.fetchDeploymentState("DOKPLOY", baseUrl,
+                "dokploy-token", "app-42", id));
+        assertEquals("/api/deployment.all?applicationId=app-42", requests.get(3).path());
     }
 
     private void handle(HttpExchange exchange) {
@@ -86,6 +90,8 @@ class DeploymentWebhookClientTests {
                     ? "{\"logs\":\"coolify build output\"}"
                     : path.startsWith("/api/v1/deploy")
                     ? "{\"deployments\":[{\"deployment_uuid\":\"coolify-deploy-1\"}]}"
+                    : path.startsWith("/api/deployment.all")
+                    ? "[{\"deploymentId\":\"dokploy-deploy-1\",\"status\":\"done\"}]"
                     : path.startsWith("/api/deployment.readLogs") ? "{\"logs\":\"dokploy build output\"}"
                     : path.equals("/api/application.deploy") ? "{\"deploymentId\":\"dokploy-deploy-1\"}" : "{}";
             byte[] bytes = response.getBytes(StandardCharsets.UTF_8);

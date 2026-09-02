@@ -78,6 +78,39 @@ public class DeploymentWebhookClient {
         return extractLogs(response);
     }
 
+    public DeploymentState fetchDeploymentState(String provider, String baseUrl, String apiToken,
+                                                 String resourceId, String providerDeploymentId) {
+        if (!"DOKPLOY".equals(provider) || baseUrl == null || apiToken == null
+                || resourceId == null || providerDeploymentId == null || providerDeploymentId.isBlank()) {
+            return DeploymentState.UNKNOWN;
+        }
+        String root = stripApiSuffix(baseUrl);
+        HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/deployment.all?applicationId="
+                        + urlEncode(resourceId)))
+                .timeout(Duration.ofSeconds(15))
+                .header("x-api-key", apiToken)
+                .header("User-Agent", "DevPilot/0.2 dokploy-deployment-state")
+                .GET().build();
+        try {
+            JsonNode deployments = objectMapper.readTree(send("DOKPLOY", request));
+            if (!deployments.isArray()) return DeploymentState.UNKNOWN;
+            for (JsonNode deployment : deployments) {
+                if (!providerDeploymentId.equals(textOrNull(deployment, "deploymentId"))) continue;
+                String status = textOrNull(deployment, "status");
+                if (status == null) return DeploymentState.UNKNOWN;
+                return switch (status.toLowerCase()) {
+                    case "done", "success", "succeeded" -> DeploymentState.SUCCEEDED;
+                    case "error", "failed", "cancelled" -> DeploymentState.FAILED;
+                    default -> DeploymentState.PENDING;
+                };
+            }
+            return DeploymentState.UNKNOWN;
+        } catch (Exception exception) {
+            if (exception instanceof IllegalStateException state) throw state;
+            throw new IllegalStateException("Unable to parse DOKPLOY deployment state", exception);
+        }
+    }
+
     private String deployCoolify(String baseUrl, String apiToken, String resourceId, String imageUri) {
         ImageReference image = ImageReference.parse(imageUri);
         String root = stripApiSuffix(baseUrl);
@@ -119,10 +152,36 @@ public class DeploymentWebhookClient {
         try {
             JsonNode rootNode = objectMapper.readTree(response);
             String id = textOrNull(rootNode, "deploymentId");
-            return id == null ? textOrNull(rootNode, "deployment_id") : id;
+            if (id == null) id = textOrNull(rootNode, "deployment_id");
+            return id == null ? awaitLatestDokployDeployment(root, apiToken, resourceId) : id;
         } catch (Exception ignored) {
-            return null;
+            return awaitLatestDokployDeployment(root, apiToken, resourceId);
         }
+    }
+
+    private String awaitLatestDokployDeployment(String root, String apiToken, String resourceId) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/deployment.all?applicationId="
+                        + urlEncode(resourceId)))
+                .timeout(Duration.ofSeconds(15))
+                .header("x-api-key", apiToken)
+                .header("User-Agent", "DevPilot/0.2 dokploy-deployment-state")
+                .GET().build();
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                JsonNode deployments = objectMapper.readTree(send("DOKPLOY", request));
+                if (deployments.isArray() && !deployments.isEmpty()) {
+                    String id = textOrNull(deployments.get(0), "deploymentId");
+                    if (id != null) return id;
+                }
+                Thread.sleep(200);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("DOKPLOY deployment lookup was interrupted", exception);
+            } catch (Exception exception) {
+                if (attempt == 4) throw new IllegalStateException("Unable to identify DOKPLOY deployment", exception);
+            }
+        }
+        throw new IllegalStateException("DOKPLOY did not return a deployment identifier");
     }
 
     private HttpRequest jsonPost(String url, String apiToken, Map<String, String> body) {
@@ -208,5 +267,9 @@ public class DeploymentWebhookClient {
             if (colon <= slash) throw new IllegalStateException("Image reference must include an immutable tag or digest");
             return new ImageReference(value.substring(0, colon), value.substring(colon + 1));
         }
+    }
+
+    public enum DeploymentState {
+        PENDING, SUCCEEDED, FAILED, UNKNOWN
     }
 }
