@@ -147,38 +147,47 @@ public class DeploymentWebhookClient {
         String root = stripApiSuffix(baseUrl);
         send("DOKPLOY", jsonPost(root + "/api/application.update", apiToken,
                 Map.of("applicationId", resourceId, "dockerImage", imageUri)));
+        String previousDeploymentId = latestDokployDeployment(root, apiToken, resourceId);
         String response = send("DOKPLOY", jsonPost(root + "/api/application.deploy", apiToken,
                 Map.of("applicationId", resourceId)));
         try {
             JsonNode rootNode = objectMapper.readTree(response);
             String id = textOrNull(rootNode, "deploymentId");
             if (id == null) id = textOrNull(rootNode, "deployment_id");
-            return id == null ? awaitLatestDokployDeployment(root, apiToken, resourceId) : id;
+            return id == null ? awaitLatestDokployDeployment(root, apiToken, resourceId, previousDeploymentId) : id;
         } catch (Exception ignored) {
-            return awaitLatestDokployDeployment(root, apiToken, resourceId);
+            return awaitLatestDokployDeployment(root, apiToken, resourceId, previousDeploymentId);
         }
     }
 
-    private String awaitLatestDokployDeployment(String root, String apiToken, String resourceId) {
+    private String latestDokployDeployment(String root, String apiToken, String resourceId) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/deployment.all?applicationId="
                         + urlEncode(resourceId)))
                 .timeout(Duration.ofSeconds(15))
                 .header("x-api-key", apiToken)
                 .header("User-Agent", "DevPilot/0.2 dokploy-deployment-state")
                 .GET().build();
-        for (int attempt = 0; attempt < 5; attempt++) {
+        try {
+            JsonNode deployments = objectMapper.readTree(send("DOKPLOY", request));
+            return deployments.isArray() && !deployments.isEmpty()
+                    ? textOrNull(deployments.get(0), "deploymentId") : null;
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private String awaitLatestDokployDeployment(String root, String apiToken, String resourceId,
+                                                String previousDeploymentId) {
+        for (int attempt = 0; attempt < 10; attempt++) {
             try {
-                JsonNode deployments = objectMapper.readTree(send("DOKPLOY", request));
-                if (deployments.isArray() && !deployments.isEmpty()) {
-                    String id = textOrNull(deployments.get(0), "deploymentId");
-                    if (id != null) return id;
-                }
-                Thread.sleep(200);
+                String id = latestDokployDeployment(root, apiToken, resourceId);
+                if (id != null && !id.equals(previousDeploymentId)) return id;
+                Thread.sleep(300);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("DOKPLOY deployment lookup was interrupted", exception);
             } catch (Exception exception) {
-                if (attempt == 4) throw new IllegalStateException("Unable to identify DOKPLOY deployment", exception);
+                if (attempt == 9) throw new IllegalStateException("Unable to identify DOKPLOY deployment", exception);
             }
         }
         throw new IllegalStateException("DOKPLOY did not return a deployment identifier");

@@ -13,6 +13,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 class DeploymentWebhookClientTests {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final List<CapturedRequest> requests = new CopyOnWriteArrayList<>();
+    private final AtomicInteger deploymentListCalls = new AtomicInteger();
     private HttpServer server;
     private String baseUrl;
 
@@ -64,19 +66,21 @@ class DeploymentWebhookClientTests {
                 baseUrl, "dokploy-token", "app-42", "registry.example/demo@sha256:" + "a".repeat(64));
 
         assertEquals("dokploy-deploy-1", id);
-        assertEquals(2, requests.size());
+        assertEquals(4, requests.size());
         assertEquals("/api/application.update", requests.get(0).path());
         assertEquals("dokploy-token", requests.get(0).apiKey());
         JsonNode update = objectMapper.readTree(requests.get(0).body());
         assertEquals("app-42", update.path("applicationId").asText());
         assertTrue(update.path("dockerImage").asText().endsWith("a".repeat(64)));
-        assertEquals("/api/application.deploy", requests.get(1).path());
+        assertEquals("/api/deployment.all?applicationId=app-42", requests.get(1).path());
+        assertEquals("/api/application.deploy", requests.get(2).path());
+        assertEquals("/api/deployment.all?applicationId=app-42", requests.get(3).path());
         assertEquals("dokploy build output", client.fetchLogs("DOKPLOY", baseUrl, "dokploy-token",
                 "app-42", id));
-        assertEquals("/api/deployment.readLogs?deploymentId=dokploy-deploy-1&tail=10000", requests.get(2).path());
+        assertEquals("/api/deployment.readLogs?deploymentId=dokploy-deploy-1&tail=10000", requests.get(4).path());
         assertEquals(DeploymentState.SUCCEEDED, client.fetchDeploymentState("DOKPLOY", baseUrl,
                 "dokploy-token", "app-42", id));
-        assertEquals("/api/deployment.all?applicationId=app-42", requests.get(3).path());
+        assertEquals("/api/deployment.all?applicationId=app-42", requests.get(5).path());
     }
 
     private void handle(HttpExchange exchange) {
@@ -91,9 +95,11 @@ class DeploymentWebhookClientTests {
                     : path.startsWith("/api/v1/deploy")
                     ? "{\"deployments\":[{\"deployment_uuid\":\"coolify-deploy-1\"}]}"
                     : path.startsWith("/api/deployment.all")
-                    ? "[{\"deploymentId\":\"dokploy-deploy-1\",\"status\":\"done\"}]"
+                    ? deploymentListCalls.incrementAndGet() == 1
+                    ? "[{\"deploymentId\":\"dokploy-deploy-0\",\"status\":\"done\"}]"
+                    : "[{\"deploymentId\":\"dokploy-deploy-1\",\"status\":\"done\"}]"
                     : path.startsWith("/api/deployment.readLogs") ? "{\"logs\":\"dokploy build output\"}"
-                    : path.equals("/api/application.deploy") ? "{\"deploymentId\":\"dokploy-deploy-1\"}" : "{}";
+                    : path.equals("/api/application.deploy") ? "{}" : "{}";
             byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, bytes.length);
