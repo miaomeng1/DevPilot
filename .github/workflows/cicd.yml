@@ -96,7 +96,29 @@ jobs:
         id: version
         shell: bash
         run: echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - name: Check immutable image tag
+        id: existing
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_URI: ${{ env.IMAGE_PREFIX }}-${{ matrix.component }}:${{ steps.version.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE_URI" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify existing multi-platform image
+        if: github.event_name != 'pull_request' && steps.existing.outputs.exists == 'true'
+        env:
+          IMAGE_URI: ${{ env.IMAGE_PREFIX }}-${{ matrix.component }}:${{ steps.version.outputs.tag }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE_URI" --raw | jq -e '
+            [.manifests[]?.platform.architecture] as $architectures
+            | ($architectures | index("amd64")) != null
+            and ($architectures | index("arm64")) != null
+          '
       - uses: docker/build-push-action@v6
+        if: github.event_name == 'pull_request' || steps.existing.outputs.exists != 'true'
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}

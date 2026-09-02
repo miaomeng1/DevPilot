@@ -77,10 +77,14 @@ make dokploy-lab-start
 make dokploy-lab-status
 ```
 
-The panel is exposed at `http://127.0.0.1:19000`. This lab runs an isolated
+The panel is exposed at `http://127.0.0.1:19000`; its Traefik HTTP and HTTPS
+entry points are exposed at ports `19080` and `19443`. This lab runs an isolated
 Docker-in-Docker Swarm so it does not change the workstation's own Swarm state.
 Its generated Postgres and authentication secrets live only in Docker Secrets.
 Use `make dokploy-lab-stop` to stop it while preserving its volumes and secrets.
+
+GitHub Actions treats each `sha-<commit>` registry tag as immutable. A rerun
+reuses and verifies an existing amd64/arm64 manifest instead of overwriting it.
 The pinned image is reused after the first successful download; set
 `DEVPILOT_DOKPLOY_REFRESH=true` only when an explicit registry refresh is
 required.

@@ -8,9 +8,12 @@ set -Eeuo pipefail
 command_name="${1:-status}"
 lab_name="${DEVPILOT_DOKPLOY_LAB_NAME:-devpilot-dokploy-lab}"
 panel_port="${DEVPILOT_DOKPLOY_LAB_PORT:-19000}"
+http_port="${DEVPILOT_DOKPLOY_LAB_HTTP_PORT:-19080}"
+https_port="${DEVPILOT_DOKPLOY_LAB_HTTPS_PORT:-19443}"
 dind_image="${DEVPILOT_DIND_IMAGE:-docker:28-dind}"
 dokploy_image="${DEVPILOT_DOKPLOY_IMAGE:-dokploy/dokploy:v0.30.3}"
 postgres_image="${DEVPILOT_DOKPLOY_POSTGRES_IMAGE:-postgres:16-alpine}"
+traefik_image="${DEVPILOT_DOKPLOY_TRAEFIK_IMAGE:-traefik:v3.6.7}"
 docker_volume="${lab_name}-docker"
 config_volume="${lab_name}-config"
 
@@ -122,14 +125,44 @@ ensure_dokploy_service() {
     "$dokploy_image" >/dev/null
 }
 
+ensure_traefik_service() {
+  # Dokploy writes the static and dynamic Traefik configuration while it
+  # starts. The production installer also runs this router; the isolated lab
+  # has to create it explicitly because it does not execute the host installer.
+  docker exec "$lab_name" mkdir -p /etc/dokploy/traefik/dynamic
+  if ! inner_docker image inspect "$traefik_image" >/dev/null 2>&1 || \
+      [[ "${DEVPILOT_DOKPLOY_REFRESH:-false}" == "true" ]]; then
+    inner_docker pull "$traefik_image"
+  fi
+  if inner_docker service inspect dokploy-traefik >/dev/null 2>&1; then
+    inner_docker service update --detach=true --no-resolve-image \
+      --image "$traefik_image" --force dokploy-traefik >/dev/null
+    return 0
+  fi
+  inner_docker service create --detach=true --no-resolve-image \
+    --name dokploy-traefik \
+    --replicas 1 \
+    --network dokploy-network \
+    --constraint 'node.role==manager' \
+    --mount type=bind,source=/etc/dokploy/traefik/traefik.yml,target=/etc/traefik/traefik.yml,readonly \
+    --mount type=bind,source=/etc/dokploy/traefik/dynamic,target=/etc/dokploy/traefik/dynamic \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --publish published=80,target=80,mode=host \
+    --publish published=443,target=443,protocol=tcp,mode=host \
+    --publish published=443,target=443,protocol=udp,mode=host \
+    "$traefik_image" >/dev/null
+}
+
 wait_for_services() {
-  local attempt replicas status_code
+  local attempt replicas traefik_replicas status_code
   for attempt in $(seq 1 90); do
     replicas="$(inner_docker service ls --format '{{.Name}} {{.Replicas}}' | awk '$1=="dokploy" {print $2}')"
+    traefik_replicas="$(inner_docker service ls --format '{{.Name}} {{.Replicas}}' | awk '$1=="dokploy-traefik" {print $2}')"
     status_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
       "http://127.0.0.1:${panel_port}/" || true)"
-    if [[ "$replicas" == "1/1" && "$status_code" =~ ^(200|302|307)$ ]]; then
-      printf 'Dokploy lab ready: http://127.0.0.1:%s (HTTP %s)\n' "$panel_port" "$status_code"
+    if [[ "$replicas" == "1/1" && "$traefik_replicas" == "1/1" && "$status_code" =~ ^(200|302|307)$ ]]; then
+      printf 'Dokploy lab ready: panel=http://127.0.0.1:%s router=http://127.0.0.1:%s (HTTP %s)\n' \
+        "$panel_port" "$http_port" "$status_code"
       return 0
     fi
     sleep 2
@@ -146,6 +179,8 @@ start_lab() {
       --restart unless-stopped \
       --env DOCKER_TLS_CERTDIR= \
       --publish "${panel_port}:3000" \
+      --publish "${http_port}:80" \
+      --publish "${https_port}:443" \
       --volume "${docker_volume}:/var/lib/docker" \
       --volume "${config_volume}:/etc/dokploy" \
       "$dind_image" --storage-driver=overlay2 >/dev/null
@@ -167,6 +202,7 @@ start_lab() {
   ensure_postgres_image
   ensure_postgres_service
   ensure_dokploy_service
+  ensure_traefik_service
   wait_for_services
 }
 

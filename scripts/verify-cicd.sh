@@ -26,9 +26,14 @@ grep -q 'sha-${GITHUB_SHA::12}' .github/workflows/cicd.yml
 grep -Fq 'CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-web' .github/workflows/cicd.yml
 grep -q 'docker/setup-qemu-action@v3' .github/workflows/cicd.yml
 grep -q 'platforms: linux/amd64,linux/arm64' .github/workflows/cicd.yml
+grep -q 'Check immutable image tag' .github/workflows/cicd.yml
+grep -q 'Verify existing multi-platform image' .github/workflows/cicd.yml
+grep -Fq "steps.existing.outputs.exists != 'true'" .github/workflows/cicd.yml
 grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-agent/Dockerfile
 grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-server/Dockerfile
 grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-web/Dockerfile
+grep -q 'ensure_traefik_service' scripts/dokploy-lab.sh
+grep -q 'traefik:v3.6.7' scripts/dokploy-lab.sh
 grep -q 'needs: \[server-test, web-test, agent-test, security-gate\]' .gitlab-ci.yml
 grep -q 'DEVPILOT_IMAGE_TAG is required' deploy/compose.registry.yml
 grep -q 'X-DevPilot-Signature: sha256=' scripts/cicd/notify-devpilot.sh

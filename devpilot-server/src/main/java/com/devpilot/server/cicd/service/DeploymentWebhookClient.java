@@ -21,6 +21,10 @@ public class DeploymentWebhookClient {
     private final HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .followRedirects(HttpClient.Redirect.NEVER)
+            // Dokploy's local HTTP endpoint closes h2c upgrade attempts without
+            // a response. Pin provider traffic to HTTP/1.1 for broad proxy and
+            // self-hosted control-plane compatibility.
+            .version(HttpClient.Version.HTTP_1_1)
             .build();
 
     public String deploy(String provider, String mode, String webhookUrl, String baseUrl,
@@ -143,7 +147,13 @@ public class DeploymentWebhookClient {
             throw new IllegalStateException(provider + " deployment was interrupted", exception);
         } catch (Exception exception) {
             if (exception instanceof IllegalStateException state) throw state;
-            throw new IllegalStateException(provider + " deployment request failed", exception);
+            String detail = exception.getMessage();
+            if ((detail == null || detail.isBlank()) && exception.getCause() != null) {
+                detail = exception.getCause().getMessage();
+            }
+            String suffix = detail == null || detail.isBlank() ? exception.getClass().getSimpleName()
+                    : exception.getClass().getSimpleName() + ": " + detail;
+            throw new IllegalStateException(provider + " deployment request failed (" + suffix + ")", exception);
         }
     }
 
