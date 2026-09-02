@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS agent-build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS agent-build
 ARG VERSION=1.0.0
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
@@ -15,7 +15,7 @@ RUN mkdir -p /out && \
       -o /out/devpilot-agent-linux-arm64 ./cmd/devpilot-agent && \
     cd /out && sha256sum devpilot-agent-linux-amd64 devpilot-agent-linux-arm64 > SHA256SUMS
 
-FROM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 COPY devpilot-web/package*.json ./
 RUN npm ci

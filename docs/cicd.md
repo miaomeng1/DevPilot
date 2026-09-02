@@ -16,6 +16,12 @@ GitHub / GitLab
 
 The deployment host never builds application source in this mode. It pulls images that already passed the same commit's quality and security gates.
 
+GitHub Actions publishes each component as a multi-platform manifest for
+`linux/amd64` and `linux/arm64`. Build stages run on the native builder platform
+and BuildKit cross-compiles the Agent, while QEMU is available for the small
+target-platform runtime layers. The same immutable tag can therefore be pulled
+by conventional x86 servers and ARM64 hosts without retagging.
+
 ## GitHub Actions
 
 Workflow: `.github/workflows/cicd.yml`

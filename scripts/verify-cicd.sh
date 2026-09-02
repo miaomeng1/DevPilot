@@ -24,6 +24,11 @@ grep -q 'needs: \[quality, security\]' .github/workflows/cicd.yml
 grep -q 'needs: \[quality, security, images\]' .github/workflows/cicd.yml
 grep -q 'sha-${GITHUB_SHA::12}' .github/workflows/cicd.yml
 grep -Fq 'CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-web' .github/workflows/cicd.yml
+grep -q 'docker/setup-qemu-action@v3' .github/workflows/cicd.yml
+grep -q 'platforms: linux/amd64,linux/arm64' .github/workflows/cicd.yml
+grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-agent/Dockerfile
+grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-server/Dockerfile
+grep -Fq 'FROM --platform=$BUILDPLATFORM' devpilot-web/Dockerfile
 grep -q 'needs: \[server-test, web-test, agent-test, security-gate\]' .gitlab-ci.yml
 grep -q 'DEVPILOT_IMAGE_TAG is required' deploy/compose.registry.yml
 grep -q 'X-DevPilot-Signature: sha256=' scripts/cicd/notify-devpilot.sh
