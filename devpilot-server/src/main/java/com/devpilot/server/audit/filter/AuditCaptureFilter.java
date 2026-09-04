@@ -33,7 +33,7 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 @RequiredArgsConstructor
 public class AuditCaptureFilter extends OncePerRequestFilter {
 
-    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|routes|maintenance-windows|users|installations)/(\\d+)");
+    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|routes|maintenance-windows|users|installations|api-tokens|webhooks|deliveries)/(\\d+)");
     private final AuditLogService auditService;
     private final ObjectMapper objectMapper;
 
@@ -132,7 +132,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
             return true;
         }
         return lower.contains("password") || (lower.contains("token") && !lower.contains("ttl")) || lower.contains("secret")
-                || (path.contains("webhook") && lower.equals("url"))
+                || (path.contains("webhook") && lower.endsWith("url"))
                 || (path.startsWith("/api/alerts/routes") && lower.equals("webhookurl"));
     }
 
@@ -187,6 +187,8 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.startsWith("/api/alerts")) return "ALERT_EVENT";
         if (path.startsWith("/api/users")) return "USER";
         if (path.startsWith("/api/settings")) return "SYSTEM_SETTING";
+        if (path.startsWith("/api/api-tokens")) return "API_TOKEN";
+        if (path.startsWith("/api/automation")) return "AUTOMATION_WEBHOOK";
         if (path.startsWith("/api/cicd")) return "CICD";
         if (path.startsWith("/api/service-templates")) return "SERVICE_TEMPLATE";
         if (path.startsWith("/api/auth")) return "AUTH_SESSION";

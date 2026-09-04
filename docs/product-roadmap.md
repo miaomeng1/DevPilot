@@ -57,7 +57,7 @@
 - [x] 多服务器调度建议与容量评分
 - [x] OpenTelemetry / Prometheus 数据导出
 - [x] 通知路由、静默窗口与维护窗口
-- [ ] 稳定公开 API 与 Webhook 事件订阅
+- [x] 稳定只读 API、独立访问 Token 与签名 Webhook 事件订阅
 
 ## 验收指标
 

@@ -4,6 +4,7 @@ import com.devpilot.server.application.entity.ApplicationDeploymentEntity;
 import com.devpilot.server.application.entity.ApplicationEntity;
 import com.devpilot.server.application.mapper.ApplicationDeploymentMapper;
 import com.devpilot.server.application.mapper.ApplicationMapper;
+import com.devpilot.server.automation.service.AutomationWebhookService;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.dto.CicdPromotionTargetResponse;
@@ -48,6 +49,7 @@ public class CicdDeploymentService {
     private final SensitiveSettingCipher cipher;
     private final ServerNodeService serverNodeService;
     private final MetricService metricService;
+    private final AutomationWebhookService automationWebhooks;
 
     @Transactional
     public void requestRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
@@ -320,6 +322,10 @@ public class CicdDeploymentService {
         }
         deployment.setUpdatedAt(now());
         deploymentMapper.updateById(deployment);
+        if ("FAILED".equals(deployment.getStatus())) {
+            ApplicationEntity application = applicationMapper.selectById(deployment.getApplicationId());
+            if (application != null) automationWebhooks.publishDeployment(deployment, application, false);
+        }
         if (run != null) {
             run.setUpdatedAt(now());
             pipelineMapper.updateById(run);
@@ -336,6 +342,7 @@ public class CicdDeploymentService {
         application.setLastDeployedAt(timestamp);
         application.setUpdatedAt(timestamp);
         applicationMapper.updateById(application);
+        automationWebhooks.publishDeployment(deployment, application, true);
         recordApplicationDeployment(deployment, application, "SUCCESS", deployment.getLogs(), timestamp);
         updatePipeline(deployment.getPipelineRunId(), "HEALTHY", null);
     }
@@ -347,6 +354,7 @@ public class CicdDeploymentService {
         deployment.setCompletedAt(timestamp);
         deployment.setUpdatedAt(timestamp);
         deploymentMapper.updateById(deployment);
+        automationWebhooks.publishDeployment(deployment, application, false);
         recordApplicationDeployment(deployment, application, "FAILED", deployment.getLogs(), timestamp);
         updatePipeline(deployment.getPipelineRunId(), "HEALTH_FAILED", reason);
 

@@ -10,6 +10,7 @@ import com.devpilot.server.alert.mapper.AlertNotificationMapper;
 import com.devpilot.server.alert.mapper.AlertRuleMapper;
 import com.devpilot.server.application.entity.ApplicationEntity;
 import com.devpilot.server.application.mapper.ApplicationMapper;
+import com.devpilot.server.automation.service.AutomationWebhookService;
 import com.devpilot.server.docker.entity.DockerContainerSnapshotEntity;
 import com.devpilot.server.docker.mapper.DockerContainerSnapshotMapper;
 import com.devpilot.server.metric.entity.ServerMetricEntity;
@@ -44,6 +45,7 @@ public class AlertEvaluationService {
     private final DockerContainerSnapshotMapper containerMapper;
     private final ApplicationMapper applicationMapper;
     private final AlertRoutingService routingService;
+    private final AutomationWebhookService automationWebhooks;
 
     @Scheduled(fixedDelayString = "${devpilot.alert.evaluation-interval:10s}", initialDelayString = "${devpilot.alert.evaluation-initial-delay:10s}")
     @Transactional
@@ -177,6 +179,7 @@ public class AlertEvaluationService {
             event.setUpdatedAt(now);
             eventMapper.insert(event);
             queueNotification(event, "FIRING", now);
+            automationWebhooks.publishAlert(event, "FIRING");
         }
     }
 
@@ -197,6 +200,7 @@ public class AlertEvaluationService {
         event.setUpdatedAt(now);
         eventMapper.updateById(event);
         queueNotification(event, "RESOLVED", now);
+        automationWebhooks.publishAlert(event, "RESOLVED");
     }
 
     private void queueNotification(AlertEventEntity event, String transition, LocalDateTime now) {

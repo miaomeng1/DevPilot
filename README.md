@@ -38,6 +38,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **服务器监控**：CPU、负载、内存、磁盘、网络及 1h / 6h / 24h / 7d 趋势
 - **容量与部署建议**：输入新服务的内存/磁盘预估，按硬门槛过滤并透明评分，单机也能判断现在是否适合继续部署
 - **标准可观测性出口**：专用 Token 保护的 Prometheus scrape 与可选 OTLP/HTTP 推送，导出低基数控制面指标
+- **个人自动化接口**：可撤销的一次性只读 API Token、版本化 `/api/v1`，以及带 HMAC 签名和持久重试的 CloudEvents Webhook
 - **磁盘水位保护**：80% 预警、90% 高危；95% 或低于 2 GiB 时暂停新发布，空间恢复后自动继续
 - **Docker 管理**：容器发现、资源统计、启动、停止、重启、删除以及实时 WebSocket 日志
 - **Compose Stack 视图**：按 Compose 标签自动关联服务，汇总健康与资源状态，并受控顺序重启运行中的服务
@@ -210,5 +211,6 @@ cd devpilot-agent && go test ./...
 - [通知路由与维护窗口](docs/alert-routing.md)
 - [容量与部署建议](docs/capacity-planning.md)
 - [Prometheus / OpenTelemetry 可观测性导出](docs/observability-export.md)
+- [公开 API 与事件 Webhook](docs/public-api-and-webhooks.md)
 - [API Map](docs/api.md)
 - [产品路线图与竞品取舍](docs/product-roadmap.md)

@@ -38,6 +38,8 @@ GitHub / GitLab
 
 The control plane can expose its bounded aggregate metrics through a dedicated-token Prometheus endpoint or push the same Micrometer registry through OTLP/HTTP. Export is disabled by default. Metric dimensions deliberately exclude server IDs, names, image references, repositories, URLs, and secrets; this keeps cardinality predictable and prevents operational metadata from becoming a second data leak surface.
 
+Personal automation uses a separate read-only API trust boundary. `dpat_*` tokens are hashed at rest, scoped to `/api/v1`, expire or revoke independently, and cannot authorize browser, Agent, metrics, or mutation endpoints. Alert and deployment transitions fan out durable CloudEvents 1.0 deliveries to explicitly selected subscriptions. Endpoint URLs and HMAC secrets are encrypted; delivery identifiers stay stable across retry so consumers can deduplicate safely.
+
 `devpilot-agent` is a single static binary. It registers once with a high-entropy token, then authenticates every Agent request independently. The control plane queues typed Docker/Nginx work; the Agent polls, validates the enum and resource identifiers, executes through a dedicated adapter, and returns a typed result. No request carries a shell command.
 
 One-click services preserve that boundary. The browser sends only an allow-listed template ID and constrained settings. The Agent keeps its own matching runtime catalog, uses the Docker SDK to pull an explicit image version, creates named volumes, applies loopback-only port bindings plus memory/log limits, and returns the created container ID. A fresh Docker snapshot is required before the control plane creates the corresponding application record.

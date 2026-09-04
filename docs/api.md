@@ -9,6 +9,21 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `GET|POST /api/users`, `PUT|DELETE /api/users/{id}`, `PUT /api/users/{id}/password`
 - `GET|PUT /api/settings`, `GET /api/system/public-settings`
 - `GET /api/audit`, `GET /api/audit/actions`
+- `GET|POST /api/api-tokens`, `DELETE /api/api-tokens/{id}` — ADMIN management; raw token is returned once.
+- `GET|POST /api/automation/webhooks`, `PUT /api/automation/webhooks/{id}/enabled`, `DELETE /api/automation/webhooks/{id}`
+- `GET /api/automation/webhooks/deliveries`, `POST /api/automation/webhooks/deliveries/{id}/retry`
+
+## Stable read-only API v1
+
+`/api/v1/**` accepts only a non-expired, non-revoked `dpat_*` token with `READ` scope through `Authorization: Bearer` or `X-DevPilot-Api-Key`; browser JWTs do not authorize this surface.
+
+- `GET /api/v1/status`
+- `GET /api/v1/servers`
+- `GET /api/v1/applications`
+- `GET /api/v1/alerts?status=&severity=&serverId=`
+- `GET /api/v1/deployments?limit=`
+
+Automation webhooks use CloudEvents 1.0 JSON and include `X-DevPilot-Event`, `X-DevPilot-Delivery`, and `X-DevPilot-Signature-256`. Endpoints and signing secrets are encrypted and write-only. Deliveries are durable, do not follow redirects, retry five times with bounded exponential backoff, and retain the event ID for manual replay.
 
 ## Infrastructure and monitoring
 

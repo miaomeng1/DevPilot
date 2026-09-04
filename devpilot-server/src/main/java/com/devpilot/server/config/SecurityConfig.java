@@ -3,6 +3,7 @@ package com.devpilot.server.config;
 import com.devpilot.server.security.DevPilotUserDetailsService;
 import com.devpilot.server.security.JwtAuthenticationFilter;
 import com.devpilot.server.observability.PrometheusScrapeFilter;
+import com.devpilot.server.publicapi.security.ApiTokenAuthenticationFilter;
 import com.devpilot.server.security.RestAccessDeniedHandler;
 import com.devpilot.server.security.RestAuthenticationEntryPoint;
 import org.springframework.context.annotation.Bean;
@@ -28,6 +29,7 @@ public class SecurityConfig {
     SecurityFilterChain securityFilterChain(HttpSecurity http,
                                             JwtAuthenticationFilter jwtAuthenticationFilter,
                                             PrometheusScrapeFilter prometheusScrapeFilter,
+                                            ApiTokenAuthenticationFilter apiTokenAuthenticationFilter,
                                             RestAuthenticationEntryPoint authenticationEntryPoint,
                                             RestAccessDeniedHandler accessDeniedHandler) throws Exception {
         return http
@@ -38,6 +40,7 @@ public class SecurityConfig {
                         .authenticationEntryPoint(authenticationEntryPoint)
                         .accessDeniedHandler(accessDeniedHandler))
                 .authorizeHttpRequests(auth -> auth
+                        .requestMatchers(HttpMethod.GET, "/api/v1/**").hasAuthority("SCOPE_API_READ")
                         .requestMatchers("/api/health", "/api/system/public-settings", "/actuator/health", "/actuator/health/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/prometheus").permitAll()
                         .requestMatchers("/api/auth/login", "/api/auth/refresh", "/api/auth/logout").permitAll()
@@ -48,7 +51,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/maintenance/backups/report").permitAll()
                         .requestMatchers("/ws/logs", "/ws/agent/logs").permitAll()
                         .anyRequest().authenticated())
-                .addFilterBefore(prometheusScrapeFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(apiTokenAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(prometheusScrapeFilter, ApiTokenAuthenticationFilter.class)
                 .addFilterAfter(jwtAuthenticationFilter, PrometheusScrapeFilter.class)
                 .build();
     }
