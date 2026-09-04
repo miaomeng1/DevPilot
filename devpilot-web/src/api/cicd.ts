@@ -24,8 +24,14 @@ export interface CicdConfiguration {
   productionApproval: boolean
   autoRollback: boolean
   healthTimeoutSeconds: number
+  previewEnabled: boolean
+  previewUrlTemplate: string | null
+  previewTtlHours: number
+  previewCallbackSecretConfigured: boolean
   callbackUrl: string
+  previewCallbackUrl: string
   oneTimeCallbackSecret: string | null
+  oneTimePreviewCallbackSecret: string | null
   updatedAt: string
 }
 
@@ -43,6 +49,10 @@ export interface CicdConfigurationPayload {
   productionApproval: boolean
   autoRollback: boolean
   healthTimeoutSeconds: number
+  previewEnabled: boolean
+  previewUrlTemplate: string
+  previewTtlHours: number
+  rotatePreviewCallbackSecret: boolean
   rotateCallbackSecret: boolean
 }
 
@@ -155,6 +165,27 @@ export interface CicdPromotionTarget {
   currentHealthyImage: string | null
 }
 
+export interface CicdPreview {
+  id: string
+  applicationId: string
+  pullRequestId: number
+  externalRunId: string
+  title: string | null
+  branchName: string
+  commitSha: string
+  imageUri: string
+  previewUrl: string | null
+  provider: DeploymentProvider
+  providerDeploymentId: string | null
+  status: 'DEPLOYING' | 'READY' | 'FAILED' | 'CLEANUP_FAILED' | 'DELETED'
+  runUrl: string | null
+  failureReason: string | null
+  expiresAt: string
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+}
+
 export interface SaveApplicationEnvironmentPayload {
   expectedRevision: number
   variables: Array<{ key: string; value: string | null; secret: boolean; description: string }>
@@ -189,6 +220,14 @@ export const cicdApi = {
     const response = await apiClient.post<ApiResponse<CicdDeployment>>(
       `/cicd/applications/${applicationId}/deployments/${deploymentId}/promote`, { targetApplicationId },
     )
+    return response.data.data
+  },
+  async previews(applicationId: string) {
+    const response = await apiClient.get<ApiResponse<CicdPreview[]>>(`/cicd/applications/${applicationId}/previews`)
+    return response.data.data
+  },
+  async deletePreview(applicationId: string, pullRequestId: number) {
+    const response = await apiClient.delete<ApiResponse<CicdPreview>>(`/cicd/applications/${applicationId}/previews/${pullRequestId}`)
     return response.data.data
   },
   async activity(limit = 20) {

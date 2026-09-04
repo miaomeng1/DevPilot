@@ -7,6 +7,7 @@ import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.CicdReadinessResponse;
 import com.devpilot.server.cicd.dto.CicdPromotionRequest;
 import com.devpilot.server.cicd.dto.CicdPromotionTargetResponse;
+import com.devpilot.server.cicd.dto.CicdPreviewResponse;
 import com.devpilot.server.cicd.dto.PipelineRunResponse;
 import com.devpilot.server.cicd.dto.ApplicationEnvironmentResponse;
 import com.devpilot.server.cicd.dto.SaveApplicationEnvironmentRequest;
@@ -14,6 +15,7 @@ import com.devpilot.server.cicd.service.ApplicationEnvironmentService;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
 import com.devpilot.server.cicd.service.CicdReadinessService;
 import com.devpilot.server.cicd.service.CicdService;
+import com.devpilot.server.cicd.service.CicdPreviewService;
 import com.devpilot.server.common.ApiResponse;
 import com.devpilot.server.security.DevPilotPrincipal;
 import jakarta.validation.Valid;
@@ -22,6 +24,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -39,6 +42,7 @@ public class CicdController {
     private final CicdDeploymentService deploymentService;
     private final ApplicationEnvironmentService environmentService;
     private final CicdReadinessService readinessService;
+    private final CicdPreviewService previewService;
 
     @GetMapping("/configurations/{applicationId}")
     public ApiResponse<CicdConfigurationResponse> configuration(@PathVariable Long applicationId) {
@@ -72,6 +76,20 @@ public class CicdController {
     @GetMapping("/applications/{applicationId}/promotion-targets")
     public ApiResponse<List<CicdPromotionTargetResponse>> promotionTargets(@PathVariable Long applicationId) {
         return ApiResponse.success(deploymentService.promotionTargets(applicationId));
+    }
+
+    @GetMapping("/applications/{applicationId}/previews")
+    public ApiResponse<List<CicdPreviewResponse>> previews(@PathVariable Long applicationId) {
+        return ApiResponse.success(previewService.list(applicationId));
+    }
+
+    @DeleteMapping("/applications/{applicationId}/previews/{pullRequestId}")
+    @PreAuthorize("hasAnyRole('ADMIN','DEVELOPER')")
+    public ApiResponse<CicdPreviewResponse> deletePreview(
+            @PathVariable Long applicationId,
+            @PathVariable Integer pullRequestId,
+            @RequestParam(defaultValue = "由 DevPilot 操作者手动回收") String reason) {
+        return ApiResponse.success(previewService.delete(applicationId, pullRequestId, reason));
     }
 
     @GetMapping("/applications/{applicationId}/environment")
@@ -126,5 +144,13 @@ public class CicdController {
             @RequestHeader(value = "X-DevPilot-Signature", required = false) String signature,
             @RequestBody byte[] body) {
         return ApiResponse.success(cicdService.receive(applicationCode, signature, body));
+    }
+
+    @PostMapping("/webhooks/{applicationCode}/previews")
+    public ApiResponse<CicdPreviewResponse> previewCallback(
+            @PathVariable String applicationCode,
+            @RequestHeader(value = "X-DevPilot-Signature", required = false) String signature,
+            @RequestBody byte[] body) {
+        return ApiResponse.success(previewService.receive(applicationCode, signature, body));
     }
 }

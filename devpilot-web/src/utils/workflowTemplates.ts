@@ -8,6 +8,10 @@ export interface WorkflowOptions {
   branch: string
   imageRepository: string
   callbackUrl: string
+  previewEnabled: boolean
+  previewCallbackUrl: string
+  previewUrlTemplate: string
+  previewTtlHours: number
   applicationCode: string
 }
 
@@ -45,12 +49,70 @@ function github(options: WorkflowOptions): GeneratedWorkflow {
   const branch = yaml(options.branch)
   const image = yaml(options.imageRepository.toLowerCase())
   const callback = yaml(options.callbackUrl)
+  const previewCallback = yaml(options.previewCallbackUrl)
   const applicationKey = safeKey(options.applicationCode)
+  const previewJobs = options.previewEnabled ? `
+  preview:
+    needs: [quality, security, image]
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    environment: preview
+    env:
+      DEVPILOT_PREVIEW_CALLBACK_URL: \${{ secrets.DEVPILOT_PREVIEW_CALLBACK_URL }}
+      DEVPILOT_PREVIEW_CALLBACK_SECRET: \${{ secrets.DEVPILOT_PREVIEW_CALLBACK_SECRET }}
+      PR_NUMBER: \${{ github.event.pull_request.number }}
+      PR_TITLE: \${{ github.event.pull_request.title }}
+      PR_HEAD: \${{ github.head_ref }}
+      PR_BASE: \${{ github.base_ref }}
+      SOURCE_SHA: \${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Register isolated preview
+        env:
+          CALLBACK_FALLBACK: ${previewCallback}
+        run: |
+          CALLBACK_URL="\${DEVPILOT_PREVIEW_CALLBACK_URL:-$CALLBACK_FALLBACK}"
+          IMAGE_URI="\${IMAGE_REPOSITORY}:sha-\${SOURCE_SHA}"
+          BODY="$(jq -nc --arg action DEPLOY --argjson pullRequestId "$PR_NUMBER" \\
+            --arg baseBranch "$PR_BASE" --arg externalRunId "github-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}" \\
+            --arg title "$PR_TITLE" --arg branchName "$PR_HEAD" \\
+            --arg commitSha "$SOURCE_SHA" --arg status SUCCEEDED --arg testStatus PASSED \\
+            --arg securityStatus PASSED --arg imageUri "$IMAGE_URI" \\
+            --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '$ARGS.named')"
+          SIGNATURE="$(printf '%s' "$BODY" | openssl dgst -sha256 \\
+            -hmac "$DEVPILOT_PREVIEW_CALLBACK_SECRET" | awk '{print $NF}')"
+          RESPONSE="$(curl --fail-with-body --retry 2 -H 'Content-Type: application/json' \\
+            -H "X-DevPilot-Signature: sha256=$SIGNATURE" --data-binary "$BODY" "$CALLBACK_URL")"
+          echo "$RESPONSE" | jq -e '.data.status == "DEPLOYING" or .data.status == "READY"'
+
+  cleanup_preview:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    environment: preview
+    env:
+      DEVPILOT_PREVIEW_CALLBACK_URL: \${{ secrets.DEVPILOT_PREVIEW_CALLBACK_URL }}
+      DEVPILOT_PREVIEW_CALLBACK_SECRET: \${{ secrets.DEVPILOT_PREVIEW_CALLBACK_SECRET }}
+      PR_NUMBER: \${{ github.event.pull_request.number }}
+      PR_BASE: \${{ github.base_ref }}
+    steps:
+      - name: Remove closed preview
+        env:
+          CALLBACK_FALLBACK: ${previewCallback}
+        run: |
+          CALLBACK_URL="\${DEVPILOT_PREVIEW_CALLBACK_URL:-$CALLBACK_FALLBACK}"
+          BODY="$(jq -nc --arg action CLOSE --argjson pullRequestId "$PR_NUMBER" \\
+            --arg baseBranch "$PR_BASE" '$ARGS.named')"
+          SIGNATURE="$(printf '%s' "$BODY" | openssl dgst -sha256 \\
+            -hmac "$DEVPILOT_PREVIEW_CALLBACK_SECRET" | awk '{print $NF}')"
+          RESPONSE="$(curl --fail-with-body --retry 2 -H 'Content-Type: application/json' \\
+            -H "X-DevPilot-Signature: sha256=$SIGNATURE" --data-binary "$BODY" "$CALLBACK_URL")"
+          echo "$RESPONSE" | jq -e '.data.status == "DELETED"'
+` : ''
   const content = `name: DevPilot delivery
 
 on:
   pull_request:
     branches: [${branch}]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [${branch}]
   workflow_dispatch:
@@ -65,18 +127,25 @@ concurrency:
 
 env:
   IMAGE_REPOSITORY: ${image}
+  SOURCE_SHA: \${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   quality:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: \${{ env.SOURCE_SHA }}
 ${githubQuality(options.runtime)}
 
   security:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: \${{ env.SOURCE_SHA }}
       - name: Trivy source, dependency, secret and IaC gate
         run: |
           docker run --rm -v "$PWD:/workspace" -w /workspace aquasec/trivy:0.65.0 fs \\
@@ -85,10 +154,12 @@ ${githubQuality(options.runtime)}
 
   image:
     needs: [quality, security]
-    if: github.event_name != 'pull_request'
+    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: \${{ env.SOURCE_SHA }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -101,8 +172,8 @@ ${githubQuality(options.runtime)}
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: \${{ env.IMAGE_REPOSITORY }}:sha-\${{ github.sha }}
-          labels: org.opencontainers.image.revision=\${{ github.sha }}
+          tags: \${{ env.IMAGE_REPOSITORY }}:sha-\${{ env.SOURCE_SHA }}
+          labels: org.opencontainers.image.revision=\${{ env.SOURCE_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -117,7 +188,7 @@ ${githubQuality(options.runtime)}
     env:
       DEVPILOT_CICD_CALLBACK_URL: \${{ secrets.DEVPILOT_CICD_CALLBACK_URL }}
       DEVPILOT_CICD_CALLBACK_SECRET: \${{ secrets.DEVPILOT_CICD_CALLBACK_SECRET }}
-      IMAGE_URI: \${{ env.IMAGE_REPOSITORY }}:sha-\${{ github.sha }}
+      IMAGE_URI: ${options.imageRepository.toLowerCase()}:sha-\${{ github.sha }}
     steps:
       - name: Send signed deployment evidence
         env:
@@ -136,11 +207,12 @@ ${githubQuality(options.runtime)}
             -hmac "$DEVPILOT_CICD_CALLBACK_SECRET" | awk '{print $NF}')"
           curl --fail-with-body --retry 2 -H 'Content-Type: application/json' \\
             -H "X-DevPilot-Signature: sha256=$SIGNATURE" --data-binary "$BODY" "$CALLBACK_URL"
+${previewJobs}
 `
   return {
     fileName: '.github/workflows/devpilot.yml', content,
-    secrets: ['DEVPILOT_CICD_CALLBACK_URL', 'DEVPILOT_CICD_CALLBACK_SECRET'],
-    notes: ['创建 production Environment，并按需添加 Required reviewers。', 'GITHUB_TOKEN 由 Actions 自动提供；Packages 必须允许写入。'],
+    secrets: ['DEVPILOT_CICD_CALLBACK_URL', 'DEVPILOT_CICD_CALLBACK_SECRET', ...(options.previewEnabled ? ['DEVPILOT_PREVIEW_CALLBACK_URL', 'DEVPILOT_PREVIEW_CALLBACK_SECRET'] : [])],
+    notes: ['创建 production Environment，并按需添加 Required reviewers。', 'GITHUB_TOKEN 由 Actions 自动提供；Packages 必须允许写入。', ...(options.previewEnabled ? [`Preview 最长保留 ${options.previewTtlHours} 小时；仅为同仓库分支创建，不运行 Fork PR。`, 'Preview 使用独立密钥，切勿向临时环境注入生产 Secrets。'] : [])],
   }
 }
 
@@ -158,6 +230,69 @@ function gitlabQuality(runtime: RuntimePreset) {
 
 function gitlab(options: WorkflowOptions): GeneratedWorkflow {
   const applicationKey = safeKey(options.applicationCode)
+  const previewUrl = yaml((options.previewUrlTemplate || 'https://pr-{{pr_id}}.preview.invalid')
+    .replace('{{pr_id}}', '$CI_MERGE_REQUEST_IID'))
+  const previewJobs = options.previewEnabled ? `
+preview:
+  stage: deploy
+  image: alpine:3.22
+  needs: [quality, security, image]
+  resource_group: preview-$CI_MERGE_REQUEST_IID
+  variables:
+    CALLBACK_FALLBACK: ${yaml(options.previewCallbackUrl)}
+  before_script:
+    - apk add --no-cache curl jq openssl
+  script:
+    - CALLBACK_URL="\${DEVPILOT_PREVIEW_CALLBACK_URL:-$CALLBACK_FALLBACK}"
+    - IMAGE_URI="$IMAGE_REPOSITORY:$IMAGE_TAG"
+    - >-
+      BODY="$(jq -nc --arg action DEPLOY --argjson pullRequestId "$CI_MERGE_REQUEST_IID"
+      --arg baseBranch "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      --arg externalRunId "gitlab-$CI_PIPELINE_ID-$CI_JOB_ID"
+      --arg title "$CI_MERGE_REQUEST_TITLE" --arg branchName "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+      --arg commitSha "$CI_COMMIT_SHA" --arg status SUCCEEDED --arg testStatus PASSED
+      --arg securityStatus PASSED --arg imageUri "$IMAGE_URI" --arg runUrl "$CI_PIPELINE_URL" '$ARGS.named')"
+    - SIGNATURE="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$DEVPILOT_PREVIEW_CALLBACK_SECRET" | awk '{print $NF}')"
+    - >-
+      RESPONSE="$(curl --fail-with-body --retry 2 -H 'Content-Type: application/json'
+      -H "X-DevPilot-Signature: sha256=$SIGNATURE" --data-binary "$BODY" "$CALLBACK_URL")"
+    - echo "$RESPONSE" | jq -e '.data.status == "DEPLOYING" or .data.status == "READY"'
+  environment:
+    name: review/$CI_MERGE_REQUEST_IID
+    url: ${previewUrl}
+    on_stop: stop_preview
+    auto_stop_in: ${options.previewTtlHours} hours
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+
+stop_preview:
+  stage: deploy
+  image: alpine:3.22
+  resource_group: preview-$CI_MERGE_REQUEST_IID
+  variables:
+    GIT_STRATEGY: none
+    CALLBACK_FALLBACK: ${yaml(options.previewCallbackUrl)}
+  before_script:
+    - apk add --no-cache curl jq openssl
+  script:
+    - CALLBACK_URL="\${DEVPILOT_PREVIEW_CALLBACK_URL:-$CALLBACK_FALLBACK}"
+    - >-
+      BODY="$(jq -nc --arg action CLOSE --argjson pullRequestId "$CI_MERGE_REQUEST_IID"
+      --arg baseBranch "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" '$ARGS.named')"
+    - SIGNATURE="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$DEVPILOT_PREVIEW_CALLBACK_SECRET" | awk '{print $NF}')"
+    - >-
+      RESPONSE="$(curl --fail-with-body --retry 2 -H 'Content-Type: application/json'
+      -H "X-DevPilot-Signature: sha256=$SIGNATURE" --data-binary "$BODY" "$CALLBACK_URL")"
+    - echo "$RESPONSE" | jq -e '.data.status == "DELETED"'
+  environment:
+    name: review/$CI_MERGE_REQUEST_IID
+    action: stop
+  when: manual
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+      when: manual
+` : ''
   const content = `stages: [test, security, build, deploy]
 
 variables:
@@ -189,6 +324,7 @@ image:
     - docker push "$IMAGE_REPOSITORY:$IMAGE_TAG"
   rules:
     - if: '$CI_COMMIT_BRANCH == $DEVPILOT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
 
 production:
   stage: deploy
@@ -217,11 +353,12 @@ production:
   rules:
     - if: '$CI_COMMIT_BRANCH == $DEVPILOT_BRANCH'
       when: manual
+${previewJobs}
 `
   return {
     fileName: '.gitlab-ci.yml', content,
-    secrets: ['DEVPILOT_CICD_CALLBACK_URL', 'DEVPILOT_CICD_CALLBACK_SECRET'],
-    notes: ['把两个变量设为 Protected + Masked。', '保护生产分支，并限制谁可以运行 production 手动作业。'],
+    secrets: ['DEVPILOT_CICD_CALLBACK_URL', 'DEVPILOT_CICD_CALLBACK_SECRET', ...(options.previewEnabled ? ['DEVPILOT_PREVIEW_CALLBACK_URL', 'DEVPILOT_PREVIEW_CALLBACK_SECRET'] : [])],
+    notes: ['把生产变量设为 Protected + Masked。', '保护生产分支，并限制谁可以运行 production 手动作业。', ...(options.previewEnabled ? [`Review App 最长保留 ${options.previewTtlHours} 小时，关闭 MR 或超时都会回收。`, 'Preview 变量使用独立密钥且只允许同项目 MR；不要复用生产 Secrets。'] : [])],
   }
 }
 

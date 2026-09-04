@@ -15,6 +15,7 @@ import com.devpilot.server.auth.entity.UserEntity;
 import com.devpilot.server.auth.mapper.UserMapper;
 import com.devpilot.server.docker.entity.DockerContainerSnapshotEntity;
 import com.devpilot.server.docker.mapper.DockerContainerSnapshotMapper;
+import com.devpilot.server.cicd.mapper.CicdPreviewMapper;
 import com.devpilot.server.exception.BusinessException;
 import com.devpilot.server.node.dto.ServerNodeResponse;
 import com.devpilot.server.node.service.ServerNodeService;
@@ -46,6 +47,7 @@ public class ApplicationService {
     private final ServerNodeService serverNodeService;
     private final UserMapper userMapper;
     private final ObjectMapper objectMapper;
+    private final CicdPreviewMapper previewMapper;
 
     public List<ApplicationResponse> list() {
         return applicationMapper.selectAll().stream().map(this::toResponse).toList();
@@ -114,7 +116,12 @@ public class ApplicationService {
 
     @Transactional
     public void delete(Long id) {
-        applicationMapper.deleteById(require(id).getId());
+        ApplicationEntity application = applicationMapper.selectByIdForUpdate(id);
+        if (application == null) throw BusinessException.notFound(40420, "应用不存在");
+        if (previewMapper.countActive(id) > 0) {
+            throw BusinessException.conflict(40956, "应用仍有活动 Preview，请先在 CI/CD 发布中心完成回收");
+        }
+        applicationMapper.deleteById(application.getId());
     }
 
     public List<ApplicationDeploymentResponse> deployments(Long applicationId) {

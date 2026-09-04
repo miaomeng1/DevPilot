@@ -3,6 +3,8 @@ package com.devpilot.server;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -11,6 +13,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.devpilot.server.cicd.service.DeploymentWebhookClient;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
+import com.devpilot.server.cicd.service.CicdPreviewService;
+import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
 import com.devpilot.server.cicd.service.DeploymentWebhookClient.EnvironmentVariable;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +46,7 @@ class CicdIntegrationTests {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private CicdDeploymentService cicdDeploymentService;
+    @Autowired private CicdPreviewService cicdPreviewService;
     @MockitoBean private DeploymentWebhookClient deploymentWebhookClient;
 
     @BeforeEach
@@ -49,6 +54,7 @@ class CicdIntegrationTests {
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM application_environment_variable");
         jdbcTemplate.update("DELETE FROM application_environment_state");
+        jdbcTemplate.update("DELETE FROM cicd_preview");
         jdbcTemplate.update("DELETE FROM cicd_deployment");
         jdbcTemplate.update("DELETE FROM cicd_pipeline_run");
         jdbcTemplate.update("DELETE FROM cicd_configuration");
@@ -523,6 +529,156 @@ class CicdIntegrationTests {
                 .andExpect(jsonPath("$.code", is(40954)));
         verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
                 "https://coolify.example/deploy/production", null, null, null, image);
+    }
+
+    @Test
+    void trustedPullRequestCreatesIsolatedPreviewAndCloseRemovesIt() throws Exception {
+        Fixture fixture = createApplication();
+        when(deploymentWebhookClient.deployPreview("COOLIFY", "API", "https://coolify.example/api/v1",
+                "provider-token", "app_42", 27, "ghcr.io/acme/demo:sha-abcdef123456"))
+                .thenReturn("preview-deployment-27");
+
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                                 "providerBaseUrl":"https://coolify.example/api/v1","providerApiToken":"provider-token",
+                                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"previewEnabled":true,
+                                 "previewUrlTemplate":"https://pr-{{pr_id}}.preview.example.com",
+                                 "previewTtlHours":24,"rotatePreviewCallbackSecret":false,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.previewEnabled", is(true)))
+                .andExpect(jsonPath("$.data.previewCallbackSecretConfigured", is(true)))
+                .andExpect(jsonPath("$.data.previewCallbackUrl", is("/api/cicd/webhooks/demo/previews")))
+                .andReturn();
+        JsonNode configuration = data(configured);
+        String previewSecret = configuration.path("oneTimePreviewCallbackSecret").asText();
+        String productionSecret = configuration.path("oneTimeCallbackSecret").asText();
+        org.junit.jupiter.api.Assertions.assertFalse(previewSecret.isBlank());
+        org.junit.jupiter.api.Assertions.assertNotEquals(productionSecret, previewSecret);
+
+        String deploy = """
+                {"action":"DEPLOY","pullRequestId":27,"baseBranch":"main",
+                 "externalRunId":"github-2701","title":"Improve dashboard","branchName":"feature/dashboard",
+                 "commitSha":"abcdef1234567890abcdef1234567890abcdef12","status":"SUCCEEDED",
+                 "testStatus":"PASSED","securityStatus":"PASSED",
+                 "imageUri":"ghcr.io/acme/demo:sha-abcdef123456",
+                 "runUrl":"https://github.com/acme/demo/actions/runs/2701"}
+                """;
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(productionSecret, deploy)).content(deploy))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(previewSecret, deploy)).content(deploy))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.pullRequestId", is(27)))
+                .andExpect(jsonPath("$.data.status", is("DEPLOYING")))
+                .andExpect(jsonPath("$.data.previewUrl", is("https://pr-27.preview.example.com")))
+                .andExpect(jsonPath("$.data.providerDeploymentId", is("preview-deployment-27")));
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(previewSecret, deploy)).content(deploy))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.providerDeploymentId", is("preview-deployment-27")));
+        verify(deploymentWebhookClient).deployPreview("COOLIFY", "API", "https://coolify.example/api/v1",
+                "provider-token", "app_42", 27, "ghcr.io/acme/demo:sha-abcdef123456");
+
+        when(deploymentWebhookClient.fetchDeploymentState("COOLIFY", "https://coolify.example/api/v1",
+                "provider-token", "app_42", "preview-deployment-27")).thenReturn(DeploymentState.SUCCEEDED);
+        cicdPreviewService.reconcileDeployments();
+        mockMvc.perform(get("/api/cicd/applications/{id}/previews", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()", is(1)))
+                .andExpect(jsonPath("$.data[0].status", is("READY")));
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/applications/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40956)));
+        mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"release","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"previewEnabled":true,
+                                 "previewUrlTemplate":"https://pr-{{pr_id}}.preview.example.com",
+                                 "previewTtlHours":24,"rotatePreviewCallbackSecret":false,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40955)));
+
+        String close = "{\"action\":\"CLOSE\",\"pullRequestId\":27,\"baseBranch\":\"main\"}";
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(previewSecret, close)).content(close))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status", is("DELETED")));
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(previewSecret, close)).content(close))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status", is("DELETED")));
+        verify(deploymentWebhookClient).deletePreview("COOLIFY", "API", "https://coolify.example/api/v1",
+                "provider-token", "app_42", 27);
+
+        jdbcTemplate.query("SELECT preview_callback_secret_cipher FROM cicd_configuration", result -> {
+            String encrypted = result.getString(1);
+            org.junit.jupiter.api.Assertions.assertTrue(encrypted.startsWith("v1:"));
+            org.junit.jupiter.api.Assertions.assertFalse(encrypted.contains(previewSecret));
+        });
+    }
+
+    @Test
+    void expiredPreviewCleanupRetriesAfterProviderFailure() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                                 "providerBaseUrl":"https://coolify.example/api/v1","providerApiToken":"provider-token",
+                                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"previewEnabled":true,
+                                 "previewUrlTemplate":"https://pr-{{pr_id}}.preview.example.com",
+                                 "previewTtlHours":1,"rotatePreviewCallbackSecret":false,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String previewSecret = data(configured).path("oneTimePreviewCallbackSecret").asText();
+        when(deploymentWebhookClient.deployPreview("COOLIFY", "API", "https://coolify.example/api/v1",
+                "provider-token", "app_42", 31, "ghcr.io/acme/demo:sha-123456789abc"))
+                .thenReturn("preview-deployment-31");
+        String deploy = """
+                {"action":"DEPLOY","pullRequestId":31,"baseBranch":"main",
+                 "externalRunId":"github-3101","title":"Retry cleanup","branchName":"feature/retry",
+                 "commitSha":"123456789abcdef0123456789abcdef012345678","status":"SUCCEEDED",
+                 "testStatus":"PASSED","securityStatus":"PASSED",
+                 "imageUri":"ghcr.io/acme/demo:sha-123456789abc"}
+                """;
+        mockMvc.perform(post("/api/cicd/webhooks/demo/previews").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(previewSecret, deploy)).content(deploy))
+                .andExpect(status().isOk());
+        jdbcTemplate.update("UPDATE cicd_preview SET expires_at = ? WHERE pull_request_id = 31",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(1));
+        doThrow(new IllegalStateException("provider temporarily unavailable")).doNothing()
+                .when(deploymentWebhookClient).deletePreview("COOLIFY", "API",
+                        "https://coolify.example/api/v1", "provider-token", "app_42", 31);
+
+        cicdPreviewService.cleanupExpired();
+        org.junit.jupiter.api.Assertions.assertEquals("CLEANUP_FAILED", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_preview WHERE pull_request_id = 31", String.class));
+        org.junit.jupiter.api.Assertions.assertTrue(jdbcTemplate.queryForObject(
+                "SELECT expires_at FROM cicd_preview WHERE pull_request_id = 31", LocalDateTime.class)
+                .isAfter(LocalDateTime.now(ZoneOffset.UTC)));
+
+        jdbcTemplate.update("UPDATE cicd_preview SET expires_at = ? WHERE pull_request_id = 31",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(1));
+        cicdPreviewService.cleanupExpired();
+        org.junit.jupiter.api.Assertions.assertEquals("DELETED", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_preview WHERE pull_request_id = 31", String.class));
+        verify(deploymentWebhookClient, times(2)).deletePreview("COOLIFY", "API",
+                "https://coolify.example/api/v1", "provider-token", "app_42", 31);
     }
 
     @Test

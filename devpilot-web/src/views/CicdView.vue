@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { applicationApi, type Application } from '@/api/applications'
-import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdPromotionTarget, type CicdReadiness, type PipelineRun } from '@/api/cicd'
+import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdPreview, type CicdPromotionTarget, type CicdReadiness, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
@@ -21,6 +21,7 @@ const rollingBack = ref('')
 const errorMessage = ref('')
 const successMessage = ref('')
 const revealedSecret = ref('')
+const revealedPreviewSecret = ref('')
 const configurationExpanded = ref(false)
 const onboardingOpen = ref(false)
 const runtimePreset = ref<RuntimePreset>('NODE')
@@ -36,6 +37,8 @@ const readinessRefreshing = ref(false)
 const promotionTargets = ref<CicdPromotionTarget[]>([])
 const promotionTarget = ref<CicdPromotionTarget | null>(null)
 const promoting = ref(false)
+const previews = ref<CicdPreview[]>([])
+const deletingPreview = ref<number | null>(null)
 const runFilter = ref('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
@@ -68,7 +71,9 @@ const environmentTemplates = [
 const form = reactive<CicdConfigurationPayload>({
   repositoryProvider: 'GITHUB', repositoryUrl: '', branchName: 'main', deploymentProvider: 'COOLIFY', deploymentMode: 'API',
   deploymentWebhookUrl: '', providerBaseUrl: '', providerApiToken: '', providerResourceId: '',
-  autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120, rotateCallbackSecret: false,
+  autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120,
+  previewEnabled: false, previewUrlTemplate: '', previewTtlHours: 72,
+  rotatePreviewCallbackSecret: false, rotateCallbackSecret: false,
 })
 
 const selectedApp = computed(() => applications.value.find((item) => item.id === selectedId.value) || null)
@@ -135,6 +140,11 @@ const callbackAbsoluteUrl = computed(() => {
   try { return new URL(configuration.value.callbackUrl, window.location.origin).toString() }
   catch { return configuration.value.callbackUrl }
 })
+const previewCallbackAbsoluteUrl = computed(() => {
+  if (!configuration.value) return ''
+  try { return new URL(configuration.value.previewCallbackUrl, window.location.origin).toString() }
+  catch { return configuration.value.previewCallbackUrl }
+})
 const generatedWorkflow = computed(() => {
   if (!configuration.value || imageRepositoryError.value) return null
   return generateWorkflow({
@@ -143,6 +153,10 @@ const generatedWorkflow = computed(() => {
     branch: configuration.value.branchName,
     imageRepository: imageRepository.value.trim(),
     callbackUrl: callbackAbsoluteUrl.value,
+    previewEnabled: configuration.value.previewEnabled,
+    previewCallbackUrl: previewCallbackAbsoluteUrl.value,
+    previewUrlTemplate: configuration.value.previewUrlTemplate || '',
+    previewTtlHours: configuration.value.previewTtlHours,
     applicationCode: configuration.value.applicationCode,
   })
 })
@@ -175,6 +189,17 @@ const environmentDiff = computed(() => {
   return { added, removed, changed, total: added.length + removed.length + changed.length }
 })
 const environmentSyncSupported = computed(() => configuration.value?.deploymentProvider === 'COOLIFY' && configuration.value?.deploymentMode === 'API')
+const previewConfigError = computed(() => {
+  if (!form.previewEnabled) return ''
+  if (form.deploymentProvider !== 'COOLIFY' || form.deploymentMode !== 'API') return '托管 Preview 当前需要 Coolify API 模式'
+  if (!['GITHUB', 'GITLAB'].includes(form.repositoryProvider)) return '自动 Preview Workflow 当前支持 GitHub 与 GitLab'
+  if (!form.previewUrlTemplate.includes('{{pr_id}}')) return 'Preview URL 模板必须包含 {{pr_id}}'
+  try {
+    const rendered = new URL(form.previewUrlTemplate.replace('{{pr_id}}', '123'))
+    if (!['http:', 'https:'].includes(rendered.protocol) || rendered.username || rendered.password) throw new Error()
+  } catch { return 'Preview URL 模板必须生成有效的 HTTP(S) 地址' }
+  return ''
+})
 
 const statusLabels: Record<string, string> = {
   SUCCEEDED: '成功 SUCCEEDED',
@@ -196,10 +221,33 @@ const statusLabels: Record<string, string> = {
   NOT_STARTED: '未开始 NOT STARTED',
   QUEUED: '排队中 QUEUED',
   SKIPPED: '已跳过 SKIPPED',
+  DEPLOYING: '部署中 DEPLOYING',
+  READY: '可访问 READY',
+  CLEANUP_FAILED: '回收失败 RETRYING',
+  DELETED: '已回收 DELETED',
 }
 
 function statusLabel(value: string) {
   return statusLabels[value] || value
+}
+
+function previewSecretHint(secret: string) {
+  if (secret === 'DEVPILOT_PREVIEW_CALLBACK_URL') return previewCallbackAbsoluteUrl.value
+  if (secret === 'DEVPILOT_CICD_CALLBACK_URL') return callbackAbsoluteUrl.value
+  if (secret === 'DEVPILOT_PREVIEW_CALLBACK_SECRET') {
+    return revealedPreviewSecret.value ? '使用右侧的一次性 Preview 密钥' : '启用或轮换 Preview 密钥后立即保存'
+  }
+  if (secret.toLowerCase().includes('callback_secret')) {
+    return revealedSecret.value ? '使用右侧的一次性生产密钥' : '请轮换生产回调密钥后立即保存'
+  }
+  return '镜像仓库凭据'
+}
+
+function previewLifetime(expiresAt: string) {
+  const remaining = new Date(expiresAt).getTime() - Date.now()
+  if (remaining <= 0) return '等待自动回收'
+  const hours = Math.ceil(remaining / 3_600_000)
+  return hours < 24 ? `约 ${hours} 小时后回收` : `约 ${Math.ceil(hours / 24)} 天后回收`
 }
 
 function suggestedImageRepository(repositoryUrl: string, provider: string) {
@@ -309,8 +357,9 @@ async function loadApplication(silent = false) {
   // refreshes pipeline evidence. It is cleared only when the operator
   // explicitly switches/reloads the application.
   if (!silent) revealedSecret.value = ''
+  if (!silent) revealedPreviewSecret.value = ''
   try {
-    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult, targetResults] = await Promise.all([
+    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult, targetResults, previewResults] = await Promise.all([
       cicdApi.configuration(selectedId.value).catch(() => null),
       cicdApi.runs(selectedId.value),
       cicdApi.deployments(selectedId.value),
@@ -318,6 +367,7 @@ async function loadApplication(silent = false) {
       cicdApi.environment(selectedId.value),
       cicdApi.readiness(selectedId.value),
       cicdApi.promotionTargets(selectedId.value),
+      cicdApi.previews(selectedId.value),
     ])
     configuration.value = configurationResult
     if (!silent) {
@@ -329,6 +379,7 @@ async function loadApplication(silent = false) {
     environment.value = environmentResult
     readiness.value = readinessResult
     promotionTargets.value = targetResults
+    previews.value = previewResults
     if (!silent) {
       resetEnvironmentDraft(environmentResult)
       environmentOpen.value = environmentResult.variables.length > 0
@@ -348,11 +399,17 @@ async function loadApplication(silent = false) {
       productionApproval: configurationResult.productionApproval,
       autoRollback: configurationResult.autoRollback,
       healthTimeoutSeconds: configurationResult.healthTimeoutSeconds,
+      previewEnabled: configurationResult.previewEnabled,
+      previewUrlTemplate: configurationResult.previewUrlTemplate || '',
+      previewTtlHours: configurationResult.previewTtlHours,
+      rotatePreviewCallbackSecret: false,
       rotateCallbackSecret: false,
     } : {
       repositoryProvider: 'GITHUB', repositoryUrl: '', branchName: 'main', deploymentProvider: 'COOLIFY', deploymentMode: 'API',
       deploymentWebhookUrl: '', providerBaseUrl: '', providerApiToken: '', providerResourceId: '',
-      autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120, rotateCallbackSecret: false,
+      autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120,
+      previewEnabled: false, previewUrlTemplate: '', previewTtlHours: 72,
+      rotatePreviewCallbackSecret: false, rotateCallbackSecret: false,
     })
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法加载流水线历史 Pipeline history')
@@ -363,7 +420,7 @@ async function save() {
   const missingWebhook = form.deploymentMode === 'WEBHOOK' && !configuration.value && !form.deploymentWebhookUrl
   const missingApi = form.deploymentMode === 'API' && (!configuration.value || !configuration.value.providerBaseUrlConfigured || !configuration.value.providerApiTokenConfigured)
     && (!form.providerBaseUrl || !form.providerApiToken || !form.providerResourceId)
-  if (!selectedId.value || !form.repositoryUrl || !form.branchName || missingWebhook || missingApi) return
+  if (!selectedId.value || !form.repositoryUrl || !form.branchName || missingWebhook || missingApi || previewConfigError.value) return
   saving.value = true
   errorMessage.value = ''
   successMessage.value = ''
@@ -371,10 +428,12 @@ async function save() {
     const saved = await cicdApi.saveConfiguration(selectedId.value, { ...form })
     configuration.value = saved
     revealedSecret.value = saved.oneTimeCallbackSecret || ''
+    revealedPreviewSecret.value = saved.oneTimePreviewCallbackSecret || ''
     form.deploymentWebhookUrl = ''
     form.providerBaseUrl = ''
     form.providerApiToken = ''
     form.rotateCallbackSecret = false
+    form.rotatePreviewCallbackSecret = false
     successMessage.value = 'CI/CD 配置已保存。Provider 凭据与回调密钥均已加密存储。'
     configurationExpanded.value = false
     onboardingOpen.value = true
@@ -383,6 +442,22 @@ async function save() {
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法保存 CI/CD 配置 Configuration')
   } finally { saving.value = false }
+}
+
+async function deletePreview(preview: CicdPreview) {
+  if (!selectedId.value || deletingPreview.value !== null) return
+  if (!window.confirm(`确认回收 PR/MR #${preview.pullRequestId} 的临时环境？`)) return
+  deletingPreview.value = preview.pullRequestId
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const deleted = await cicdApi.deletePreview(selectedId.value, preview.pullRequestId)
+    if (deleted.status === 'DELETED') successMessage.value = `Preview #${preview.pullRequestId} 已回收。`
+    else errorMessage.value = deleted.failureReason || 'Provider 暂未完成回收，系统将在 15 分钟后自动重试。'
+    previews.value = await cicdApi.previews(selectedId.value)
+  } catch (error) {
+    errorMessage.value = apiErrorMessage(error, '无法回收 Preview environment')
+  } finally { deletingPreview.value = null }
 }
 
 async function rollback(deployment: CicdDeployment) {
@@ -471,9 +546,9 @@ function environmentStatusLabel(status: ApplicationEnvironment['syncStatus'] | u
 }
 
 function tone(value: string) {
-  if (['SUCCEEDED', 'PASSED', 'HEALTHY'].includes(value)) return 'success'
-  if (['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED'].includes(value)) return 'danger'
-  if (['RUNNING', 'QUEUED', 'TRIGGERING', 'TRIGGERED', 'VERIFYING'].includes(value)) return 'running'
+  if (['SUCCEEDED', 'PASSED', 'HEALTHY', 'READY'].includes(value)) return 'success'
+  if (['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'CLEANUP_FAILED'].includes(value)) return 'danger'
+  if (['RUNNING', 'QUEUED', 'TRIGGERING', 'TRIGGERED', 'VERIFYING', 'DEPLOYING'].includes(value)) return 'running'
   return 'neutral'
 }
 
@@ -569,6 +644,26 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         <button type="button" @click="configurationExpanded = true">编辑配置</button>
       </section>
 
+      <section v-if="configuration" class="preview-environments" :class="{ disabled: !configuration.previewEnabled }">
+        <header>
+          <div><span>临时预览 · PULL REQUEST PREVIEWS</span><strong>{{ configuration.previewEnabled ? `${previews.filter((item) => item.status !== 'DELETED').length} 个待管理环境` : '按需启用，不占用常驻端口' }}</strong><p>每个 PR / MR 使用独立容器和访问地址；关闭或超时后自动回收。</p></div>
+          <div class="preview-policy"><b>{{ configuration.previewEnabled ? `${configuration.previewTtlHours}H TTL` : 'DISABLED' }}</b><small>{{ configuration.previewEnabled ? 'Coolify isolated runtime' : '需要 Coolify API 模式' }}</small></div>
+        </header>
+        <div v-if="configuration.previewEnabled && previews.length" class="preview-grid">
+          <article v-for="preview in previews.slice(0, 12)" :key="preview.id" :class="preview.status.toLowerCase()">
+            <div class="preview-card-heading"><span>#{{ preview.pullRequestId }}</span><b class="pipeline-state" :class="tone(preview.status)">{{ statusLabel(preview.status) }}</b></div>
+            <strong>{{ preview.title || preview.branchName }}</strong>
+            <p><code>{{ preview.branchName }}</code><span>{{ preview.commitSha.slice(0, 12) }}</span></p>
+            <a v-if="preview.previewUrl && ['DEPLOYING', 'READY'].includes(preview.status)" :href="preview.previewUrl" target="_blank" rel="noreferrer">{{ preview.previewUrl }} ↗</a>
+            <small v-else>{{ preview.failureReason || 'Provider 正在准备访问地址' }}</small>
+            <footer><time>{{ ['DELETED', 'FAILED'].includes(preview.status) ? formatTime(preview.updatedAt) : previewLifetime(preview.expiresAt) }}</time><div><a v-if="preview.runUrl" :href="preview.runUrl" target="_blank" rel="noreferrer">CI</a><button v-if="canPromote && preview.status !== 'DELETED'" type="button" :disabled="deletingPreview !== null" @click="deletePreview(preview)">{{ deletingPreview === preview.pullRequestId ? '回收中…' : '回收' }}</button></div></footer>
+          </article>
+        </div>
+        <div v-else-if="configuration.previewEnabled" class="preview-empty"><span>◇</span><div><strong>等待第一个 Pull / Merge Request</strong><p>使用下方接入向导生成新 Workflow；通过测试和扫描后会自动出现在这里。</p></div></div>
+        <div v-else class="preview-empty"><span>＋</span><div><strong>需要时再启用 Preview</strong><p>适合在合并前从手机或另一台电脑验收页面，不与生产容器共享变量。</p></div><button v-if="canConfigure" type="button" @click="configurationExpanded = true">配置 Preview</button></div>
+        <aside v-if="configuration.previewEnabled"><strong>Secret isolation</strong><span>Preview 只使用独立回调密钥；运行变量请在 Coolify 的 Preview Environment Variables 中配置，禁止复制生产凭据。</span></aside>
+      </section>
+
       <section v-if="configuration" class="onboarding-panel" :class="{ expanded: onboardingOpen }">
         <header>
           <div class="onboarding-title"><span>仓库接入向导 · REPOSITORY ONBOARDING</span><strong>生成一条真正可执行的交付流水线</strong><p>测试、安全扫描、构建不可变镜像，再把签名发布凭证交给 DevPilot。</p></div>
@@ -603,7 +698,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
               <div class="config-section secrets-section">
                 <span class="section-kicker">03 · PROTECTED SECRETS</span>
                 <strong>在 CI 平台创建 Secrets</strong>
-                <ul v-if="generatedWorkflow"><li v-for="secret in generatedWorkflow.secrets" :key="secret"><code>{{ secret }}</code><span>{{ secret.toLowerCase().includes('url') ? callbackAbsoluteUrl : secret.toLowerCase().includes('callback_secret') ? (revealedSecret ? '使用右侧的一次性密钥' : '请轮换回调密钥后立即保存') : '镜像仓库凭据' }}</span></li></ul>
+                <ul v-if="generatedWorkflow"><li v-for="secret in generatedWorkflow.secrets" :key="secret"><code>{{ secret }}</code><span>{{ previewSecretHint(secret) }}</span></li></ul>
                 <p v-if="callbackIsLocal" class="local-warning">当前回调是本机地址，云端 CI 无法访问。正式使用时请通过域名/HTTPS 暴露 DevPilot，再重新生成此文件。</p>
               </div>
 
@@ -683,8 +778,15 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             <label class="check"><input v-model="form.productionApproval" type="checkbox" /><span>生产环境需要 CI 平台审批 Production approval</span></label>
             <label class="check"><input v-model="form.autoRollback" type="checkbox" /><span>健康检查失败时自动回滚最新健康镜像 Auto rollback</span></label>
             <label><span>健康超时 Health timeout（秒）</span><input v-model.number="form.healthTimeoutSeconds" type="number" min="30" max="1800" required /></label>
+            <label class="check wide preview-enable"><input v-model="form.previewEnabled" type="checkbox" /><span>为同仓库 PR / MR 创建隔离临时环境 Managed Preview</span></label>
+            <template v-if="form.previewEnabled">
+              <label class="wide"><span>Preview URL 模板</span><input v-model.trim="form.previewUrlTemplate" type="text" placeholder="https://pr-{{pr_id}}.preview.example.com" maxlength="1000" required /><small>必须先把 <code>*.preview.example.com</code> 的通配 DNS 指向部署服务器。</small></label>
+              <label><span>最长保留 Preview TTL（小时）</span><input v-model.number="form.previewTtlHours" type="number" min="1" max="720" required /></label>
+              <label v-if="configuration?.previewCallbackSecretConfigured" class="check"><input v-model="form.rotatePreviewCallbackSecret" type="checkbox" /><span>轮换独立 Preview 回调密钥</span></label>
+              <p v-if="previewConfigError" class="wide form-validation">{{ previewConfigError }}</p>
+            </template>
             <label v-if="configuration" class="check danger-check"><input v-model="form.rotateCallbackSecret" type="checkbox" /><span>轮换回调密钥，并使旧 CI Secret 失效</span></label>
-            <footer class="wide"><button v-if="canConfigure" class="primary-action" :disabled="saving" type="submit">{{ saving ? '保存中…' : '保存配置 Save' }}</button><small v-else>需要管理员角色才能修改部署设置。</small></footer>
+            <footer class="wide"><button v-if="canConfigure" class="primary-action" :disabled="saving || !!previewConfigError" type="submit">{{ saving ? '保存中…' : '保存配置 Save' }}</button><small v-else>需要管理员角色才能修改部署设置。</small></footer>
           </form>
         </section>
 
@@ -692,7 +794,9 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
           <header><strong>签名回调 Signed callback</strong><small>CI 向 DevPilot 报告可信凭证</small></header>
           <div v-if="configuration" class="callback-body">
             <label><span>回调地址 Callback path</span><code>{{ configuration.callbackUrl }}</code><button @click="copy(configuration.callbackUrl)">复制 Copy</button></label>
+            <label v-if="configuration.previewEnabled"><span>Preview callback</span><code>{{ configuration.previewCallbackUrl }}</code><button @click="copy(configuration.previewCallbackUrl)">复制 Copy</button></label>
             <label v-if="revealedSecret" class="secret-reveal"><span>一次性回调密钥 One-time secret</span><code>{{ revealedSecret }}</code><button @click="copy(revealedSecret)">立即复制</button><small>此值不会再次显示，请存入受保护的 CI Secret。</small></label>
+            <label v-if="revealedPreviewSecret" class="secret-reveal preview-secret"><span>一次性 Preview 密钥</span><code>{{ revealedPreviewSecret }}</code><button @click="copy(revealedPreviewSecret)">立即复制</button><small>权限仅限临时环境；不会再次显示。</small></label>
             <p>请求头 Header：<code>X-DevPilot-Signature: sha256=&lt;HMAC&gt;</code></p>
             <p>成功回调必须证明测试和安全门禁已通过，并使用 Digest 或 <code>sha-*</code> 镜像标签。</p>
           </div>
@@ -755,6 +859,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 .promotion-panel{overflow:hidden;margin-top:16px;border:1px solid rgba(99,102,241,.18);border-radius:16px;background:linear-gradient(135deg,rgba(238,242,255,.055),var(--panel) 42%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.promotion-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:19px 21px;border-bottom:1px solid var(--line)}.promotion-panel>header div>span,.promotion-panel>header div>strong{display:block}.promotion-panel>header div>span{color:#7c85df;font-size:9px;font-weight:850;letter-spacing:.13em}.promotion-panel>header div>strong{margin-top:6px;font-size:15px}.promotion-panel>header p{margin:5px 0 0;color:var(--muted);font-size:10px}.promotion-source{display:flex;align-items:center;gap:8px;border:1px solid rgba(99,102,241,.18);border-radius:18px;padding:6px 10px;color:#6c72c9;background:rgba(99,102,241,.06);font-size:9px;font-weight:850}.promotion-source b{color:#9aa2b3}
 .promotion-artifact{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line);background:rgba(34,197,94,.035)}.promotion-artifact.missing{background:rgba(245,158,11,.035)}.promotion-artifact span{color:#607089;font-size:9px;font-weight:750}.promotion-artifact strong{overflow:hidden;color:#5b4db0;font:10px ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.promotion-artifact a{color:#3975c6;font-size:9px;text-decoration:none}.promotion-targets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.promotion-targets article{display:grid;min-width:0;padding:15px 16px;background:var(--panel-solid)}.promotion-targets article.blocked{background:rgba(245,158,11,.025)}.target-heading{display:flex;align-items:center;justify-content:space-between}.target-heading>span{color:#6d72c7;font-size:9px;font-weight:850;letter-spacing:.08em}.target-heading>b{border-radius:5px;padding:4px 6px;color:#16803d;background:rgba(34,197,94,.08);font-size:7px}.target-heading>b.blocked{color:#a56509;background:rgba(245,158,11,.1)}.promotion-targets article>strong{margin-top:10px;font-size:13px}.promotion-targets article>small{margin-top:4px;color:var(--muted);font-size:9px}.promotion-targets article>code{overflow:hidden;margin-top:10px;color:#7567ba;font:8px ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.promotion-targets ul{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.promotion-targets li{color:#9a670c;font-size:8px;line-height:1.4}.promotion-targets li::before{content:'×';margin-right:5px;color:#d97706}.target-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:13px}.target-actions a{color:#3975c6;font-size:8px;text-decoration:none}.target-actions button{height:30px;border:0;border-radius:7px;padding:0 10px;color:#fff;background:#6366f1;font-size:8px;font-weight:800}.target-actions button:disabled{cursor:not-allowed;color:#8a95a6;background:rgba(148,163,184,.1)}.promotion-empty{padding:24px;text-align:center}.promotion-empty strong{font-size:11px}.promotion-empty p{margin:6px 0 0;color:var(--muted);font-size:9px}
 .activity-kind.promotion{border-color:rgba(99,102,241,.2);color:#818cf8;background:rgba(99,102,241,.07)}.promotion-dialog{width:min(620px,100%)}.promotion-route{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:21px 23px;border-bottom:1px solid var(--line)}.promotion-route>div{display:grid;gap:4px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel)}.promotion-route>div>span{color:#7c85df;font-size:8px;font-weight:850}.promotion-route>div>strong{font-size:14px}.promotion-route>div>small{color:var(--muted);font-size:9px}.promotion-route>b{color:#818cf8;font-size:18px}.promotion-dialog-body{display:grid;gap:8px;padding:20px 23px}.promotion-dialog-body>span{color:#68778c;font-size:9px;font-weight:750}.promotion-dialog-body>code{overflow:auto;border:1px solid var(--line);border-radius:8px;padding:11px;color:#7567ba;background:var(--panel);font:10px ui-monospace,monospace}.promotion-dialog-body>p{margin:4px 0 0;color:var(--muted);font-size:10px;line-height:1.6}.promotion-dialog>footer .confirm-promotion{border-color:transparent;color:#fff;background:#6366f1;font-weight:800}.promotion-dialog>footer .confirm-promotion:disabled{opacity:.45}
+.preview-environments{overflow:hidden;margin-top:16px;border:1px solid rgba(20,184,166,.18);border-radius:16px;background:linear-gradient(140deg,rgba(204,251,241,.055),var(--panel) 40%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.preview-environments.disabled{border-color:var(--line);background:var(--panel)}.preview-environments>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:19px 21px;border-bottom:1px solid var(--line)}.preview-environments>header div:first-child>span,.preview-environments>header div:first-child>strong{display:block}.preview-environments>header div:first-child>span{color:#26998c;font-size:9px;font-weight:850;letter-spacing:.13em}.preview-environments>header div:first-child>strong{margin-top:6px;font-size:15px}.preview-environments>header p{margin:5px 0 0;color:var(--muted);font-size:10px}.preview-policy{display:grid;justify-items:end;gap:4px}.preview-policy b{border-radius:18px;padding:6px 9px;color:#168276;background:rgba(20,184,166,.08);font-size:9px}.preview-policy small{color:var(--muted);font-size:8px}.preview-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.preview-grid article{display:grid;min-width:0;padding:15px 16px;background:var(--panel-solid)}.preview-grid article.deleted{opacity:.62}.preview-grid article.cleanup_failed{background:rgba(239,68,68,.025)}.preview-card-heading{display:flex;align-items:center;justify-content:space-between}.preview-card-heading>span{color:#258f84;font-size:10px;font-weight:900}.preview-grid article>strong{overflow:hidden;margin-top:10px;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.preview-grid article>p{display:flex;gap:7px;min-width:0;margin:7px 0 0;color:var(--muted);font-size:9px}.preview-grid article>p code{overflow:hidden;color:#67778d;text-overflow:ellipsis;white-space:nowrap}.preview-grid article>a{overflow:hidden;margin-top:12px;color:#238b80;font-size:9px;text-decoration:none;text-overflow:ellipsis;white-space:nowrap}.preview-grid article>small{overflow:hidden;margin-top:12px;color:#9b6a2e;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.preview-grid article>footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:14px}.preview-grid time{color:var(--muted);font-size:8px}.preview-grid footer>div{display:flex;align-items:center;gap:6px}.preview-grid footer a,.preview-grid footer button{height:27px;border:1px solid var(--line);border-radius:6px;padding:0 8px;color:#3d6f86;background:transparent;font-size:8px;text-decoration:none}.preview-grid footer a{display:flex;align-items:center}.preview-grid footer button{color:#a45c42}.preview-grid footer button:disabled{opacity:.45}.preview-empty{display:flex;min-height:94px;align-items:center;justify-content:center;gap:13px;padding:18px}.preview-empty>span{display:grid;width:34px;height:34px;place-items:center;border-radius:11px;color:#26998c;background:rgba(20,184,166,.08);font-size:17px}.preview-empty strong,.preview-empty p{display:block}.preview-empty strong{font-size:11px}.preview-empty p{margin:5px 0 0;color:var(--muted);font-size:9px}.preview-empty>button{height:34px;margin-left:12px;border:0;border-radius:8px;padding:0 11px;color:#fff;background:#26998c;font-size:9px;font-weight:800}.preview-environments>aside{display:flex;gap:9px;padding:10px 20px;border-top:1px solid rgba(20,184,166,.12);color:#557876;background:rgba(20,184,166,.035);font-size:8px;line-height:1.5}.preview-environments>aside strong{color:#238b80}.form-validation{margin:0;border:1px solid rgba(239,68,68,.18);border-radius:8px;padding:9px;color:#c24141;background:rgba(239,68,68,.04);font-size:10px}.preview-secret{border-color:rgba(20,184,166,.22);background:rgba(20,184,166,.045)}
 .cicd-environment-panel{overflow:hidden;margin-top:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 10px 32px rgba(38,57,84,.04)}
 .cicd-environment-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 22px}
 .cicd-environment-panel.expanded>header{border-bottom:1px solid var(--line)}
@@ -768,9 +873,11 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 @media(max-width:1100px){.environment-body{grid-template-columns:1fr}.environment-templates{grid-template-columns:1fr 1fr 1fr}.environment-templates>div{grid-column:1/-1}.environment-row{grid-template-columns:1fr 1fr}.environment-description{grid-column:1/-1}.secret-toggle,.remove-variable{justify-self:start}}
 @media(max-width:1100px){.readiness-checks{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:1100px){.promotion-targets{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1100px){.preview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header,.cicd-environment-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body,.environment-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}.environment-header-actions{width:100%;justify-content:space-between}.environment-templates{grid-template-columns:1fr 1fr}.environment-row{grid-template-columns:1fr}.environment-description{grid-column:auto}.secret-toggle,.remove-variable{justify-self:stretch}.remove-variable{width:100%}}
 @media(max-width:700px){.readiness-panel>header{grid-template-columns:auto 1fr}.readiness-summary{grid-column:1/-1}.readiness-checks{grid-template-columns:1fr}}
 @media(max-width:700px){.promotion-panel>header{align-items:flex-start;flex-direction:column}.promotion-artifact{grid-template-columns:1fr}.promotion-targets{grid-template-columns:1fr}.promotion-route{grid-template-columns:1fr}.promotion-route>b{justify-self:center;transform:rotate(90deg)}}
+@media(max-width:700px){.preview-environments>header{align-items:flex-start;flex-direction:column}.preview-policy{justify-items:start}.preview-grid{grid-template-columns:1fr}.preview-empty{align-items:flex-start;flex-direction:column}.preview-empty>button{width:100%;margin:0}.preview-environments>aside{flex-direction:column}}
 :global(:root[data-theme='light']) .cicd-panel,:global(:root[data-theme='light']) .callback-panel,:global(:root[data-theme='light']) .pipeline-panel,:global(:root[data-theme='light']) .connection-strip{box-shadow:0 8px 28px rgba(38,57,84,.045)}
 :global(:root[data-theme='light']) .delivery-overview>header p{color:#5f7088}
 :global(:root[data-theme='light']) .delivery-actions a,:global(:root[data-theme='light']) .connection-strip>button{color:#41658f;background:#fff}

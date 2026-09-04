@@ -19,5 +19,9 @@ public record CicdConfigurationRequest(
         @NotNull Boolean productionApproval,
         Boolean autoRollback,
         @jakarta.validation.constraints.Min(30) @jakarta.validation.constraints.Max(1800) Integer healthTimeoutSeconds,
+        Boolean previewEnabled,
+        @Size(max = 1000) String previewUrlTemplate,
+        @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(720) Integer previewTtlHours,
+        Boolean rotatePreviewCallbackSecret,
         @NotNull Boolean rotateCallbackSecret) {
 }

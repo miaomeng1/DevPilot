@@ -51,6 +51,56 @@ public class DeploymentWebhookClient {
         send(provider, request);
     }
 
+    public String deployPreview(String provider, String mode, String baseUrl, String apiToken,
+                                String resourceId, int pullRequestId, String imageUri) {
+        if (!"COOLIFY".equals(provider) || !"API".equals(mode)) {
+            throw new IllegalStateException("Managed previews require COOLIFY API mode");
+        }
+        ImageReference image = ImageReference.parse(imageUri);
+        String root = stripApiSuffix(baseUrl);
+        String applicationEndpoint = root + "/api/v1/applications/" + urlEncode(resourceId);
+        HttpRequest inspect = HttpRequest.newBuilder(URI.create(applicationEndpoint))
+                .timeout(Duration.ofSeconds(15))
+                .header("Authorization", "Bearer " + apiToken)
+                .header("User-Agent", "DevPilot/0.2 coolify-preview-inspection")
+                .GET().build();
+        try {
+            String configuredRepository = textOrNull(objectMapper.readTree(send("COOLIFY", inspect)),
+                    "docker_registry_image_name");
+            if (!image.repository().equals(configuredRepository)) {
+                throw new IllegalStateException("Preview image repository does not match the Coolify application");
+            }
+        } catch (IllegalStateException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to verify Coolify preview image repository", exception);
+        }
+        String endpoint = root + "/api/v1/deploy?uuid=" + urlEncode(resourceId)
+                + "&pull_request_id=" + pullRequestId + "&docker_tag=" + urlEncode(image.providerTag());
+        HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(20))
+                .header("Authorization", "Bearer " + apiToken)
+                .header("User-Agent", "DevPilot/0.2 coolify-preview-deployment")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        return deploymentId(send("COOLIFY", request));
+    }
+
+    public void deletePreview(String provider, String mode, String baseUrl, String apiToken,
+                              String resourceId, int pullRequestId) {
+        if (!"COOLIFY".equals(provider) || !"API".equals(mode)) {
+            throw new IllegalStateException("Managed previews require COOLIFY API mode");
+        }
+        String root = stripApiSuffix(baseUrl);
+        HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/v1/applications/"
+                        + urlEncode(resourceId) + "/previews/" + pullRequestId))
+                .timeout(Duration.ofSeconds(20))
+                .header("Authorization", "Bearer " + apiToken)
+                .header("User-Agent", "DevPilot/0.2 coolify-preview-cleanup")
+                .DELETE().build();
+        sendAllowNotFound("COOLIFY", request);
+    }
+
     public String fetchLogs(String provider, String baseUrl, String apiToken, String resourceId,
                             String providerDeploymentId) {
         if (baseUrl == null || apiToken == null || resourceId == null) return null;
@@ -138,11 +188,27 @@ public class DeploymentWebhookClient {
 
     public DeploymentState fetchDeploymentState(String provider, String baseUrl, String apiToken,
                                                  String resourceId, String providerDeploymentId) {
-        if (!"DOKPLOY".equals(provider) || baseUrl == null || apiToken == null
-                || resourceId == null || providerDeploymentId == null || providerDeploymentId.isBlank()) {
+        if (baseUrl == null || apiToken == null || resourceId == null
+                || providerDeploymentId == null || providerDeploymentId.isBlank()) {
             return DeploymentState.UNKNOWN;
         }
         String root = stripApiSuffix(baseUrl);
+        if ("COOLIFY".equals(provider)) {
+            HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/v1/deployments/"
+                            + urlEncode(providerDeploymentId)))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Authorization", "Bearer " + apiToken)
+                    .header("User-Agent", "DevPilot/0.2 coolify-deployment-state")
+                    .GET().build();
+            try {
+                String status = textOrNull(objectMapper.readTree(send("COOLIFY", request)), "status");
+                return deploymentState(status);
+            } catch (Exception exception) {
+                if (exception instanceof IllegalStateException state) throw state;
+                throw new IllegalStateException("Unable to parse COOLIFY deployment state", exception);
+            }
+        }
+        if (!"DOKPLOY".equals(provider)) return DeploymentState.UNKNOWN;
         HttpRequest request = HttpRequest.newBuilder(URI.create(root + "/api/deployment.all?applicationId="
                         + urlEncode(resourceId)))
                 .timeout(Duration.ofSeconds(15))
@@ -156,11 +222,7 @@ public class DeploymentWebhookClient {
                 if (!providerDeploymentId.equals(textOrNull(deployment, "deploymentId"))) continue;
                 String status = textOrNull(deployment, "status");
                 if (status == null) return DeploymentState.UNKNOWN;
-                return switch (status.toLowerCase()) {
-                    case "done", "success", "succeeded" -> DeploymentState.SUCCEEDED;
-                    case "error", "failed", "cancelled" -> DeploymentState.FAILED;
-                    default -> DeploymentState.PENDING;
-                };
+                return deploymentState(status);
             }
             return DeploymentState.UNKNOWN;
         } catch (Exception exception) {
@@ -192,13 +254,7 @@ public class DeploymentWebhookClient {
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();
         String response = send("COOLIFY", deploy);
-        try {
-            JsonNode deployments = objectMapper.readTree(response).path("deployments");
-            return deployments.isArray() && !deployments.isEmpty()
-                    ? textOrNull(deployments.get(0), "deployment_uuid") : null;
-        } catch (Exception ignored) {
-            return null;
-        }
+        return deploymentId(response);
     }
 
     private String deployDokploy(String baseUrl, String apiToken, String resourceId, String imageUri) {
@@ -283,12 +339,49 @@ public class DeploymentWebhookClient {
         }
     }
 
+    private void sendAllowNotFound(String provider, HttpRequest request) {
+        try {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if ((response.statusCode() < 200 || response.statusCode() >= 300) && response.statusCode() != 404) {
+                throw new IllegalStateException(provider + " API returned HTTP " + response.statusCode());
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(provider + " cleanup was interrupted", exception);
+        } catch (Exception exception) {
+            if (exception instanceof IllegalStateException state) throw state;
+            throw new IllegalStateException(provider + " cleanup request failed", exception);
+        }
+    }
+
     private String json(Object body) {
         try {
             return objectMapper.writeValueAsString(body);
         } catch (Exception exception) {
             throw new IllegalStateException("Unable to serialize deployment request", exception);
         }
+    }
+
+    private String deploymentId(String response) {
+        try {
+            JsonNode deployments = objectMapper.readTree(response).path("deployments");
+            return deployments.isArray() && !deployments.isEmpty()
+                    ? textOrNull(deployments.get(0), "deployment_uuid") : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static DeploymentState deploymentState(String status) {
+        if (status == null) return DeploymentState.UNKNOWN;
+        String normalized = status.toLowerCase();
+        if (Set.of("done", "success", "succeeded", "finished").contains(normalized)) {
+            return DeploymentState.SUCCEEDED;
+        }
+        if (normalized.contains("fail") || normalized.contains("error") || normalized.contains("cancel")) {
+            return DeploymentState.FAILED;
+        }
+        return DeploymentState.PENDING;
     }
 
     private static String stripApiSuffix(String value) {

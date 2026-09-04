@@ -26,6 +26,10 @@ public class CicdConfigurationEntity {
     private Integer productionApproval;
     private Integer autoRollback;
     private Integer healthTimeoutSeconds;
+    private Integer previewEnabled;
+    private String previewUrlTemplate;
+    private Integer previewTtlHours;
+    private String previewCallbackSecretCipher;
     private Long createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

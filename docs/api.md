@@ -32,9 +32,12 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `GET /api/cicd/applications/{applicationId}/readiness`
 - `GET /api/cicd/applications/{applicationId}/promotion-targets`
 - `POST /api/cicd/applications/{applicationId}/deployments/{deploymentId}/promote`
+- `GET /api/cicd/applications/{applicationId}/previews`
+- `DELETE /api/cicd/applications/{applicationId}/previews/{pullRequestId}`
 - `GET|PUT /api/cicd/applications/{applicationId}/environment`
 - `POST /api/cicd/applications/{applicationId}/environment/sync`
 - `POST /api/cicd/applications/{applicationId}/deployments/{deploymentId}/rollback`
+- `POST /api/cicd/webhooks/{applicationCode}/previews` (separate Preview HMAC secret; `DEPLOY` / `CLOSE`)
 - Signed CI callback: `POST /api/cicd/webhooks/{applicationCode}` with `X-DevPilot-Signature: sha256=<HMAC>`
 
 Provider URLs and tokens are write-only encrypted settings. Deployment responses include the immutable image, provider deployment ID, collected provider logs, health deadline and rollback linkage, but never provider credentials.

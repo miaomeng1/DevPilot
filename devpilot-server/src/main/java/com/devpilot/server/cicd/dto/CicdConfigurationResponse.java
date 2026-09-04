@@ -20,7 +20,13 @@ public record CicdConfigurationResponse(
         boolean productionApproval,
         boolean autoRollback,
         int healthTimeoutSeconds,
+        boolean previewEnabled,
+        String previewUrlTemplate,
+        int previewTtlHours,
+        boolean previewCallbackSecretConfigured,
         String callbackUrl,
+        String previewCallbackUrl,
         String oneTimeCallbackSecret,
+        String oneTimePreviewCallbackSecret,
         LocalDateTime updatedAt) {
 }

@@ -10,6 +10,7 @@ import com.devpilot.server.cicd.entity.CicdConfigurationEntity;
 import com.devpilot.server.cicd.entity.CicdPipelineRunEntity;
 import com.devpilot.server.cicd.mapper.CicdConfigurationMapper;
 import com.devpilot.server.cicd.mapper.CicdPipelineRunMapper;
+import com.devpilot.server.cicd.mapper.CicdPreviewMapper;
 import com.devpilot.server.exception.BusinessException;
 import com.devpilot.server.security.DevPilotPrincipal;
 import com.devpilot.server.security.SensitiveSettingCipher;
@@ -38,6 +39,7 @@ public class CicdService {
     private static final SecureRandom RANDOM = new SecureRandom();
     private final CicdConfigurationMapper configurationMapper;
     private final CicdPipelineRunMapper pipelineMapper;
+    private final CicdPreviewMapper previewMapper;
     private final ApplicationMapper applicationMapper;
     private final SensitiveSettingCipher cipher;
     private final CicdDeploymentService deploymentService;
@@ -50,13 +52,14 @@ public class CicdService {
         if (entity == null) {
             throw BusinessException.notFound(40440, "CI/CD 配置不存在");
         }
-        return toConfiguration(entity, application, null);
+        return toConfiguration(entity, application, null, null);
     }
 
     @Transactional
     public CicdConfigurationResponse saveConfiguration(Long applicationId, CicdConfigurationRequest request,
                                                        DevPilotPrincipal principal) {
         ApplicationEntity application = requireApplication(applicationId);
+        applicationMapper.selectByIdForUpdate(applicationId);
         validateHttpUrl(request.repositoryUrl(), "仓库 URL");
         CicdConfigurationEntity entity = configurationMapper.selectByApplicationId(applicationId);
         boolean create = entity == null;
@@ -77,6 +80,21 @@ public class CicdService {
         String baseUrl = trimToNull(request.providerBaseUrl());
         String apiToken = trimToNull(request.providerApiToken());
         String resourceId = trimToNull(request.providerResourceId());
+        if (!create && previewMapper.countActive(applicationId) > 0) {
+            boolean providerChanged = !entity.getDeploymentProvider().equals(request.deploymentProvider())
+                    || !valueOr(entity.getDeploymentMode(), "WEBHOOK").equals(mode)
+                    || !entity.getRepositoryProvider().equals(request.repositoryProvider())
+                    || !entity.getRepositoryUrl().equals(normalizeUrl(request.repositoryUrl()))
+                    || !entity.getBranchName().equals(request.branchName().trim())
+                    || (resourceId != null && !resourceId.equals(entity.getProviderResourceId()))
+                    || (baseUrl != null && !normalizeUrl(baseUrl).equals(decrypt(entity.getProviderBaseUrlCipher())))
+                    || apiToken != null
+                    || Boolean.TRUE.equals(request.rotatePreviewCallbackSecret());
+            if (providerChanged) {
+                throw BusinessException.conflict(40955,
+                        "仍有活动 Preview；请先回收后再更换仓库、分支、Provider 凭据、资源 ID 或 Preview 密钥");
+            }
+        }
         if (baseUrl != null) {
             validateHttpUrl(baseUrl, "部署平台地址");
             entity.setProviderBaseUrlCipher(cipher.encrypt(normalizeUrl(baseUrl)));
@@ -88,10 +106,27 @@ public class CicdService {
                 || entity.getProviderResourceId() == null)) {
             throw BusinessException.badRequest(40046, "API 模式必须配置平台地址、最小权限 API Token 和资源 ID");
         }
+        boolean previewEnabled = Boolean.TRUE.equals(request.previewEnabled());
+        String previewUrlTemplate = trimToNull(request.previewUrlTemplate());
+        if (previewEnabled) {
+            if (!"COOLIFY".equals(request.deploymentProvider()) || !"API".equals(mode)) {
+                throw BusinessException.badRequest(40064, "托管 Preview 当前需要 Coolify API 模式");
+            }
+            if (!("GITHUB".equals(request.repositoryProvider()) || "GITLAB".equals(request.repositoryProvider()))) {
+                throw BusinessException.badRequest(40064, "自动 Preview Workflow 当前支持 GitHub 与 GitLab");
+            }
+            CicdPreviewService.validateTemplate(previewUrlTemplate);
+        }
         String oneTimeSecret = null;
         if (create || request.rotateCallbackSecret()) {
             oneTimeSecret = newSecret();
             entity.setCallbackSecretCipher(cipher.encrypt(oneTimeSecret));
+        }
+        String oneTimePreviewSecret = null;
+        if (previewEnabled && (entity.getPreviewCallbackSecretCipher() == null
+                || Boolean.TRUE.equals(request.rotatePreviewCallbackSecret()))) {
+            oneTimePreviewSecret = newPreviewSecret();
+            entity.setPreviewCallbackSecretCipher(cipher.encrypt(oneTimePreviewSecret));
         }
         entity.setRepositoryProvider(request.repositoryProvider());
         entity.setRepositoryUrl(normalizeUrl(request.repositoryUrl()));
@@ -102,9 +137,12 @@ public class CicdService {
         entity.setProductionApproval(request.productionApproval() ? 1 : 0);
         entity.setAutoRollback(Boolean.FALSE.equals(request.autoRollback()) ? 0 : 1);
         entity.setHealthTimeoutSeconds(request.healthTimeoutSeconds() == null ? 120 : request.healthTimeoutSeconds());
+        entity.setPreviewEnabled(previewEnabled ? 1 : 0);
+        entity.setPreviewUrlTemplate(previewUrlTemplate);
+        entity.setPreviewTtlHours(request.previewTtlHours() == null ? 72 : request.previewTtlHours());
         entity.setUpdatedAt(now());
         if (create) configurationMapper.insert(entity); else configurationMapper.updateById(entity);
-        return toConfiguration(entity, application, oneTimeSecret);
+        return toConfiguration(entity, application, oneTimeSecret, oneTimePreviewSecret);
     }
 
     public List<PipelineRunResponse> listRuns(Long applicationId) {
@@ -203,7 +241,7 @@ public class CicdService {
     }
 
     private CicdConfigurationResponse toConfiguration(CicdConfigurationEntity entity, ApplicationEntity application,
-                                                       String oneTimeSecret) {
+                                                       String oneTimeSecret, String oneTimePreviewSecret) {
         return new CicdConfigurationResponse(entity.getId(), entity.getApplicationId(), application.getCode(),
                 entity.getRepositoryProvider(), entity.getRepositoryUrl(), entity.getBranchName(),
                 entity.getDeploymentProvider(), valueOr(entity.getDeploymentMode(), "WEBHOOK"),
@@ -212,8 +250,12 @@ public class CicdService {
                 entity.getCallbackSecretCipher() != null, entity.getAutoDeploy() == 1,
                 entity.getProductionApproval() == 1, entity.getAutoRollback() == null || entity.getAutoRollback() == 1,
                 entity.getHealthTimeoutSeconds() == null ? 120 : entity.getHealthTimeoutSeconds(),
+                Integer.valueOf(1).equals(entity.getPreviewEnabled()), entity.getPreviewUrlTemplate(),
+                entity.getPreviewTtlHours() == null ? 72 : entity.getPreviewTtlHours(),
+                entity.getPreviewCallbackSecretCipher() != null,
                 "/api/cicd/webhooks/" + application.getCode(),
-                oneTimeSecret, entity.getUpdatedAt());
+                "/api/cicd/webhooks/" + application.getCode() + "/previews",
+                oneTimeSecret, oneTimePreviewSecret, entity.getUpdatedAt());
     }
 
     private static PipelineRunResponse toRun(CicdPipelineRunEntity run) {
@@ -254,6 +296,12 @@ public class CicdService {
         return "dp_ci_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
+    private static String newPreviewSecret() {
+        byte[] bytes = new byte[32];
+        RANDOM.nextBytes(bytes);
+        return "dp_preview_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
     private static boolean terminal(String status) {
         return !"RUNNING".equals(status);
     }
@@ -268,6 +316,10 @@ public class CicdService {
 
     private static String valueOr(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private String decrypt(String value) {
+        return value == null ? null : cipher.decrypt(value);
     }
 
     private static LocalDateTime now() {

@@ -2,6 +2,7 @@ package com.devpilot.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.devpilot.server.cicd.service.DeploymentWebhookClient;
 import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
@@ -64,6 +65,37 @@ class DeploymentWebhookClientTests {
     }
 
     @Test
+    void coolifyPreviewUsesPullRequestApiAndDedicatedDeleteEndpoint() {
+        DeploymentWebhookClient client = new DeploymentWebhookClient(objectMapper);
+        String id = client.deployPreview("COOLIFY", "API", baseUrl + "/api/v1", "coolify-token",
+                "app_42", 27, "ghcr.io/acme/demo:sha-abcdef123456");
+
+        assertEquals("coolify-deploy-1", id);
+        assertEquals("GET", requests.get(0).method());
+        assertEquals("/api/v1/applications/app_42", requests.get(0).path());
+        assertEquals("POST", requests.get(1).method());
+        assertEquals("/api/v1/deploy?uuid=app_42&pull_request_id=27&docker_tag=sha-abcdef123456",
+                requests.get(1).path());
+        assertEquals(DeploymentState.SUCCEEDED, client.fetchDeploymentState("COOLIFY", baseUrl,
+                "coolify-token", "app_42", id));
+        assertEquals("/api/v1/deployments/coolify-deploy-1", requests.get(2).path());
+
+        client.deletePreview("COOLIFY", "API", baseUrl, "coolify-token", "app_42", 27);
+        assertEquals("DELETE", requests.get(3).method());
+        assertEquals("/api/v1/applications/app_42/previews/27", requests.get(3).path());
+    }
+
+    @Test
+    void coolifyPreviewRejectsImageFromAnotherRepository() {
+        DeploymentWebhookClient client = new DeploymentWebhookClient(objectMapper);
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> client.deployPreview("COOLIFY", "API", baseUrl, "coolify-token",
+                        "app_42", 28, "ghcr.io/other/demo:sha-abcdef123456"));
+        assertTrue(error.getMessage().contains("does not match"));
+        assertEquals(1, requests.size());
+    }
+
+    @Test
     void dokployUpdatesExactImageThenDeploys() throws Exception {
         DeploymentWebhookClient client = new DeploymentWebhookClient(objectMapper);
         String id = client.deploy("DOKPLOY", "API", null,
@@ -117,12 +149,14 @@ class DeploymentWebhookClientTests {
             requests.add(new CapturedRequest(exchange.getRequestMethod(), path, body,
                     exchange.getRequestHeaders().getFirst("Authorization"),
                     exchange.getRequestHeaders().getFirst("x-api-key")));
-            String response = path.equals("/api/v1/applications/app_42/envs")
+            String response = path.equals("/api/v1/applications/app_42") && "GET".equals(exchange.getRequestMethod())
+                    ? "{\"docker_registry_image_name\":\"ghcr.io/acme/demo\"}"
+                    : path.equals("/api/v1/applications/app_42/envs")
                     && "GET".equals(exchange.getRequestMethod())
                     ? "[{\"key\":\"KEEP\",\"uuid\":\"keep-uuid\"},{\"key\":\"OLD_KEY\",\"uuid\":\"old-uuid\"},"
                     + "{\"key\":\"UNMANAGED\",\"uuid\":\"safe-uuid\"}]"
                     : path.startsWith("/api/v1/deployments/")
-                    ? "{\"logs\":\"coolify build output\"}"
+                    ? "{\"logs\":\"coolify build output\",\"status\":\"finished\"}"
                     : path.startsWith("/api/v1/deploy")
                     ? "{\"deployments\":[{\"deployment_uuid\":\"coolify-deploy-1\"}]}"
                     : path.startsWith("/api/deployment.all")
