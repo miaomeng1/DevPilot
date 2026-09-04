@@ -30,25 +30,27 @@ type Snapshot struct {
 }
 
 type ContainerSnapshot struct {
-	ContainerID  string     `json:"containerId"`
-	Name         string     `json:"name"`
-	Image        string     `json:"image"`
-	State        string     `json:"state"`
-	Status       string     `json:"status"`
-	Health       string     `json:"health,omitempty"`
-	CPUUsage     float64    `json:"cpuUsage"`
-	MemoryUsage  uint64     `json:"memoryUsage"`
-	MemoryLimit  uint64     `json:"memoryLimit"`
-	NetworkRX    uint64     `json:"networkRx"`
-	NetworkTX    uint64     `json:"networkTx"`
-	IPAddress    string     `json:"ipAddress,omitempty"`
-	Ports        []string   `json:"ports"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	StartedAt    *time.Time `json:"startedAt,omitempty"`
-	RestartCount int        `json:"restartCount"`
-	NetworkMode  string     `json:"networkMode,omitempty"`
-	Volumes      []string   `json:"volumes"`
-	Environment  []string   `json:"environment"`
+	ContainerID    string     `json:"containerId"`
+	Name           string     `json:"name"`
+	Image          string     `json:"image"`
+	State          string     `json:"state"`
+	Status         string     `json:"status"`
+	Health         string     `json:"health,omitempty"`
+	CPUUsage       float64    `json:"cpuUsage"`
+	MemoryUsage    uint64     `json:"memoryUsage"`
+	MemoryLimit    uint64     `json:"memoryLimit"`
+	NetworkRX      uint64     `json:"networkRx"`
+	NetworkTX      uint64     `json:"networkTx"`
+	IPAddress      string     `json:"ipAddress,omitempty"`
+	Ports          []string   `json:"ports"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	RestartCount   int        `json:"restartCount"`
+	NetworkMode    string     `json:"networkMode,omitempty"`
+	ComposeProject string     `json:"composeProject,omitempty"`
+	ComposeService string     `json:"composeService,omitempty"`
+	Volumes        []string   `json:"volumes"`
+	Environment    []string   `json:"environment"`
 }
 
 type Engine struct {
@@ -226,6 +228,8 @@ func (e *Engine) collectContainer(ctx context.Context, summary container.Summary
 		CreatedAt: time.Unix(summary.Created, 0).UTC(), NetworkMode: summary.HostConfig.NetworkMode,
 		Ports: formatPorts(summary), Volumes: []string{}, Environment: []string{},
 	}
+	snapshot.ComposeProject = strings.TrimSpace(summary.Labels["com.docker.compose.project"])
+	snapshot.ComposeService = strings.TrimSpace(summary.Labels["com.docker.compose.service"])
 	if summary.NetworkSettings != nil {
 		for _, endpoint := range summary.NetworkSettings.Networks {
 			if endpoint != nil && endpoint.IPAddress != "" {

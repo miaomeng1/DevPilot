@@ -124,6 +124,7 @@ onBeforeUnmount(() => {
         <div><dt>Container ID</dt><dd class="mono">{{ container?.containerId || '—' }}</dd></div><div><dt>Status</dt><dd>{{ container?.status || '—' }}</dd></div>
         <div><dt>Health</dt><dd>{{ container?.health || 'No health check' }}</dd></div><div><dt>IP address</dt><dd>{{ container?.ipAddress || '—' }}</dd></div>
         <div><dt>Network mode</dt><dd>{{ container?.networkMode || '—' }}</dd></div><div><dt>Created</dt><dd>{{ time(container?.createdAt) }}</dd></div>
+        <div><dt>Compose Stack</dt><dd>{{ container?.composeProject || '独立容器 Standalone' }}</dd></div><div><dt>Compose Service</dt><dd>{{ container?.composeService || '—' }}</dd></div>
       </dl></article>
       <article class="detail-panel list-panel"><header><div><strong>Published ports</strong><small>Host-to-container mappings</small></div><span>{{ container?.ports.length || 0 }}</span></header><ul><li v-for="port in container?.ports" :key="port" class="mono">{{ port }}</li><li v-if="!container?.ports.length" class="empty-list">No published ports</li></ul></article>
       <article class="detail-panel list-panel volumes-panel"><header><div><strong>Volumes</strong><small>Mount sources, destinations, and access</small></div><span>{{ container?.volumes.length || 0 }}</span></header><ul><li v-for="volume in container?.volumes" :key="volume" class="mono">{{ volume }}</li><li v-if="!container?.volumes.length" class="empty-list">No mounted volumes</li></ul></article>

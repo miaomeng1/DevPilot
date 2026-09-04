@@ -144,6 +144,8 @@ public class DockerInventoryService {
         }
         entity.setRestartCount(snapshot.restartCount());
         entity.setNetworkMode(trimToNull(snapshot.networkMode()));
+        entity.setComposeProject(trimToNull(snapshot.composeProject()));
+        entity.setComposeService(trimToNull(snapshot.composeService()));
         entity.setVolumesJson(json(snapshot.volumes()));
         entity.setEnvironmentJson(json(snapshot.environment().stream().map(DockerInventoryService::mask).toList()));
         entity.setActive(1);
@@ -164,6 +166,7 @@ public class DockerInventoryService {
                 entity.getMemoryUsage(), entity.getMemoryLimit(), entity.getNetworkRx(), entity.getNetworkTx(),
                 entity.getIpAddress(), fromJson(entity.getPortsJson()), entity.getContainerCreatedAt(),
                 entity.getStartedAt(), entity.getRestartCount(), entity.getNetworkMode(),
+                entity.getComposeProject(), entity.getComposeService(),
                 fromJson(entity.getVolumesJson()), fromJson(entity.getEnvironmentJson()), entity.getLastSeenAt());
     }
 

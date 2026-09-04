@@ -31,6 +31,8 @@ public class DockerContainerSnapshotEntity {
     private LocalDateTime restartWindowStartedAt;
     private Integer restartWindowCount;
     private String networkMode;
+    private String composeProject;
+    private String composeService;
     private String volumesJson;
     private String environmentJson;
     private Integer active;

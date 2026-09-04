@@ -79,6 +79,8 @@ class DockerIntegrationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data", hasSize(2)))
                 .andExpect(jsonPath("$.data[0].name", is("api")))
+                .andExpect(jsonPath("$.data[0].composeProject", is("personal-cloud")))
+                .andExpect(jsonPath("$.data[0].composeService", is("api")))
                 .andExpect(jsonPath("$.data[0].environment", hasItem("DB_PASSWORD=******")))
                 .andExpect(jsonPath("$.data[0].environment", hasItem("MODE=production")))
                 .andReturn();
@@ -143,6 +145,7 @@ class DockerIntegrationTests {
                    "networkRx":1000,"networkTx":2000,"ipAddress":"172.18.0.2",
                    "ports":["0.0.0.0:8080→8080/tcp"],"createdAt":"2026-08-30T00:00:00Z",
                    "startedAt":"2026-08-31T00:00:00Z","restartCount":1,"networkMode":"bridge",
+                   "composeProject":"personal-cloud","composeService":"api",
                    "volumes":["/data/api:/app/data:rw"],
                    "environment":["MODE=production","DB_PASSWORD=plain-secret"]},
                   {"containerId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

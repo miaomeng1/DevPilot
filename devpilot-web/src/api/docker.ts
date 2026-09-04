@@ -35,6 +35,8 @@ export interface DockerContainer {
   startedAt: string | null
   restartCount: number
   networkMode: string | null
+  composeProject: string | null
+  composeService: string | null
   volumes: string[]
   environment: string[]
   lastSeenAt: string

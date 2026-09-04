@@ -24,6 +24,8 @@ public record DockerContainerResponse(
         LocalDateTime startedAt,
         Integer restartCount,
         String networkMode,
+        String composeProject,
+        String composeService,
         List<String> volumes,
         List<String> environment,
         LocalDateTime lastSeenAt) {

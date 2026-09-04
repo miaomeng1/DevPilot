@@ -27,6 +27,8 @@ public record AgentDockerContainerSnapshot(
         Instant startedAt,
         @NotNull @PositiveOrZero Integer restartCount,
         @Size(max = 128) String networkMode,
+        @Size(max = 255) String composeProject,
+        @Size(max = 255) String composeService,
         @NotNull @Size(max = 256) List<@Size(max = 1000) String> volumes,
         @NotNull @Size(max = 512) List<@Size(max = 2048) String> environment) {
 }
