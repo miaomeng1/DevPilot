@@ -41,6 +41,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **Compose Stack 视图**：按 Compose 标签自动关联服务，汇总健康与资源状态，并受控顺序重启运行中的服务
 - **Nginx 安全变更**：暂存编辑 → `nginx -t` → 备份 → 替换 → Reload，支持历史记录与回滚
 - **告警中心**：磁盘、持续离线、健康失败与 10 分钟容器重启风暴检测，支持飞书、企业微信和 Discord Webhook
+- **通知路由与静默**：按严重级别/服务器发送到多个接收端，支持跨午夜 Quiet Hours、一次性维护窗口和 Critical 绕过
 - **权限与审计**：ADMIN / DEVELOPER / VIEWER RBAC，关键操作审计与敏感字段结构化脱敏
 - **自托管交付**：Docker Compose、MySQL 8、Redis、Linux Agent、systemd 安装及备份恢复脚本
 - **备份维护中心**：主机脚本完成数据库归档与 SHA-256 自检后，签名上报凭证，并记录隔离恢复演练结果
@@ -204,5 +205,6 @@ cd devpilot-agent && go test ./...
 - [部署指南](docs/deployment.md)
 - [CI/CD 指南](docs/cicd.md)
 - [个人服务模板](docs/service-templates.md)
+- [通知路由与维护窗口](docs/alert-routing.md)
 - [API Map](docs/api.md)
 - [产品路线图与竞品取舍](docs/product-roadmap.md)

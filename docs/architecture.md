@@ -61,7 +61,7 @@ The Agent writes candidate content to a temporary file, runs `nginx -t`, and abo
 
 ### Alerts
 
-Rules maintain durable condition state so duration thresholds survive restarts. A transition creates or updates an alert event and enqueues a notification. Delivery runs out of a durable queue with bounded exponential retries and does not follow redirects. Webhook URLs are encrypted with AES-GCM; their plaintext is never returned by an API or written to audit logs.
+Rules maintain durable condition state so duration thresholds survive restarts. A transition creates or updates an alert event and fans out durable notification rows to matching severity/server routes. Delivery uses bounded exponential retries and does not follow redirects. Recurring quiet hours and one-time server/global maintenance windows mute delivery only: evaluation and event history continue. Routes can let `CRITICAL` alerts bypass mute periods. Webhook URLs are encrypted with AES-GCM; their plaintext is never returned by an API or written to audit logs. The original single webhook remains a fallback only while no new route is enabled.
 
 ### CI/CD evidence and deployment
 

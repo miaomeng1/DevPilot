@@ -64,6 +64,10 @@ Application environment values are all AES-GCM encrypted at rest. Secret values 
 - `GET|POST /api/alerts/rules`, `PUT|DELETE /api/alerts/rules/{id}`
 - `GET /api/alerts`, `GET /api/alerts/summary`, `POST /api/alerts/{id}/acknowledge`
 - `GET|PUT /api/alerts/webhook`
+- `GET|POST /api/alerts/routes`, `PUT|DELETE /api/alerts/routes/{id}`
+- `GET|POST /api/alerts/maintenance-windows`, `DELETE /api/alerts/maintenance-windows/{id}`
+
+Notification routes are ADMIN-managed and match by minimum severity plus optional server scope. Webhook URLs are encrypted and write-only. Multiple matching routes each receive a durable delivery attempt; when at least one route is enabled, the legacy webhook is not duplicated. Recurring quiet hours and one-time maintenance windows suppress delivery without pausing rule evaluation or hiding the event timeline. A route may explicitly allow `CRITICAL` alerts to bypass mute periods.
 
 ## CI/CD control plane
 

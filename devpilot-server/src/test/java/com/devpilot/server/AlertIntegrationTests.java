@@ -4,6 +4,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -21,6 +22,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +55,8 @@ class AlertIntegrationTests {
     void resetDatabase() {
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM alert_notification");
+        jdbcTemplate.update("DELETE FROM alert_maintenance_window");
+        jdbcTemplate.update("DELETE FROM alert_notification_route");
         jdbcTemplate.update("DELETE FROM alert_condition_state");
         jdbcTemplate.update("DELETE FROM alert_event");
         jdbcTemplate.update("DELETE FROM alert_rule");
@@ -199,6 +203,110 @@ class AlertIntegrationTests {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data", hasSize(1)));
+    }
+
+    @Test
+    void routesEncryptSecretsAndMaintenanceMutesUnlessCriticalBypasses() throws Exception {
+        AtomicInteger deliveries = new AtomicInteger();
+        webhookServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        webhookServer.createContext("/routed", exchange -> {
+            deliveries.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        webhookServer.start();
+        String webhookUrl = "http://127.0.0.1:" + webhookServer.getAddress().getPort() + "/routed";
+
+        String accessToken = setupAdministrator();
+        MvcResult serverResult = mockMvc.perform(post("/api/servers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"route-node\"}"))
+                .andExpect(status().isOk()).andReturn();
+        String serverId = data(serverResult).path("server").path("id").asText();
+        String agentToken = data(serverResult).path("agentToken").asText();
+        register(agentToken);
+        uploadMetric(agentToken, 98.0);
+
+        String mutedRoute = routePayload("Normal route", serverId, webhookUrl, false);
+        mockMvc.perform(post("/api/alerts/routes")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON).content(mutedRoute))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.destinationType", is("CUSTOM")))
+                .andExpect(jsonPath("$.data.configured", is(true)));
+        mockMvc.perform(post("/api/alerts/routes")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(routePayload("Emergency route", serverId, webhookUrl, true)))
+                .andExpect(status().isOk());
+
+        String encrypted = jdbcTemplate.queryForObject(
+                "SELECT webhook_url_encrypted FROM alert_notification_route WHERE name = 'Normal route'",
+                String.class);
+        if (encrypted == null || !encrypted.startsWith("v1:") || encrypted.contains(webhookUrl)) {
+            throw new AssertionError("Notification route webhook must be encrypted at rest");
+        }
+        mockMvc.perform(get("/api/alerts/routes").header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data", hasSize(2)))
+                .andExpect(jsonPath("$.data[0].webhookUrl").doesNotExist());
+
+        MvcResult maintenance = mockMvc.perform(post("/api/alerts/maintenance-windows")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "name", "Kernel upgrade", "reason", "Planned reboot", "serverId", serverId,
+                                "startsAt", Instant.now().minusSeconds(60),
+                                "endsAt", Instant.now().plusSeconds(3600)))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.status", is("ACTIVE"))).andReturn();
+        String maintenanceId = data(maintenance).path("id").asText();
+
+        mockMvc.perform(post("/api/alerts/rules")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "name", "Routed CPU alert", "metricType", "SERVER_CPU", "operator", "GT",
+                                "threshold", 90, "durationSeconds", 0, "severity", "CRITICAL",
+                                "serverId", serverId, "enabled", true))))
+                .andExpect(status().isOk());
+        evaluationService.evaluateAll();
+        webhookDeliveryService.deliverPending();
+
+        if (deliveries.get() != 1) {
+            throw new AssertionError("Only the critical-bypass route should deliver during maintenance");
+        }
+        Integer muted = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM alert_notification WHERE status = 'MUTED'", Integer.class);
+        Integer succeeded = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM alert_notification WHERE status = 'SUCCEEDED'", Integer.class);
+        if (!Integer.valueOf(1).equals(muted) || !Integer.valueOf(1).equals(succeeded)) {
+            throw new AssertionError("Expected one muted and one delivered route notification");
+        }
+        mockMvc.perform(get("/api/alerts").header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].notificationStatus", is("SUCCEEDED")))
+                .andExpect(jsonPath("$.data[0].deliveries", hasSize(2)))
+                .andExpect(jsonPath("$.data[0].deliveries[?(@.status == 'MUTED')]", hasSize(1)))
+                .andExpect(jsonPath("$.data[0].deliveries[?(@.status == 'SUCCEEDED')]", hasSize(1)));
+
+        String auditParameters = jdbcTemplate.queryForObject(
+                "SELECT request_params FROM audit_log WHERE action = 'CREATE_ALERT_ROUTE' ORDER BY occurred_at DESC LIMIT 1",
+                String.class);
+        if (auditParameters == null || auditParameters.contains(webhookUrl) || !auditParameters.contains("[REDACTED]")) {
+            throw new AssertionError("Route webhook URL must be redacted from audit logs");
+        }
+        mockMvc.perform(delete("/api/alerts/maintenance-windows/{id}", maintenanceId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk());
+    }
+
+    private String routePayload(String name, String serverId, String webhookUrl, boolean criticalBypass)
+            throws Exception {
+        return objectMapper.writeValueAsString(Map.ofEntries(
+                Map.entry("name", name), Map.entry("serverId", serverId),
+                Map.entry("minimumSeverity", "WARNING"), Map.entry("webhookUrl", webhookUrl),
+                Map.entry("notifyResolved", true), Map.entry("enabled", true),
+                Map.entry("quietEnabled", false), Map.entry("quietDays", java.util.List.of()),
+                Map.entry("timezone", "UTC"), Map.entry("criticalBypassMute", criticalBypass)));
     }
 
     private void register(String token) throws Exception {

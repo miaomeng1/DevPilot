@@ -100,6 +100,12 @@ const router = createRouter({
           meta: { title: 'Alert rules' },
         },
         {
+          path: 'alerts/routing',
+          name: 'alert-routing',
+          component: () => import('@/views/AlertRoutingView.vue'),
+          meta: { title: '通知路由与维护窗口', roles: ['ADMIN'] },
+        },
+        {
           path: 'maintenance',
           name: 'maintenance',
           component: () => import('@/views/MaintenanceView.vue'),

@@ -54,6 +54,16 @@ function age(value: string) {
   return `${Math.floor(seconds / 86400)}d ago`
 }
 
+function currentDeliveries(event: AlertEvent) {
+  const transition = event.deliveries[0]?.transition
+  return transition ? event.deliveries.filter((delivery) => delivery.transition === transition) : []
+}
+
+function deliveryTitle(delivery: AlertEvent['deliveries'][number]) {
+  const details = [delivery.responseCode ? `HTTP ${delivery.responseCode}` : '', delivery.errorMessage || ''].filter(Boolean)
+  return details.length ? details.join(' · ') : `${delivery.transition} notification`
+}
+
 onMounted(async () => { await servers.load(); await load(); timer = window.setInterval(() => void load(true), 10_000) })
 onBeforeUnmount(() => window.clearInterval(timer))
 </script>
@@ -61,7 +71,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 <template>
   <section class="alerts-view">
     <header class="page-heading alert-heading"><div><p class="eyebrow">INCIDENT TIMELINE</p><h1>Alert events</h1><span>Active conditions, human acknowledgement, recovery, and delivery status.</span></div><RouterLink v-if="auth.hasAnyRole(['ADMIN'])" class="primary-compact" to="/alerts/rules"><b>⚙</b>Manage rules</RouterLink></header>
-    <nav class="alert-tabs"><RouterLink class="active" to="/alerts">Events</RouterLink><RouterLink to="/alerts/rules">Rules</RouterLink></nav>
+    <nav class="alert-tabs"><RouterLink class="active" to="/alerts">事件 Events</RouterLink><RouterLink to="/alerts/rules">规则 Rules</RouterLink><RouterLink v-if="auth.hasAnyRole(['ADMIN'])" to="/alerts/routing">通知与静默 Routing</RouterLink></nav>
     <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
 
     <div class="alert-summary"><article class="issues"><span>Active</span><strong>{{ summary.active }}</strong><small>Firing or acknowledged</small></article><article class="critical"><span>Critical</span><strong>{{ summary.critical }}</strong><small>Active critical incidents</small></article><article><span>Acknowledged</span><strong>{{ counts.acknowledged }}</strong><small>In current result set</small></article><article class="available"><span>Resolved</span><strong>{{ counts.resolved }}</strong><small>In current result set</small></article></div>
@@ -69,7 +79,22 @@ onBeforeUnmount(() => window.clearInterval(timer))
     <article class="alert-table-panel event-panel"><header><div class="alert-filters"><select v-model="statusFilter" @change="load()"><option value="">All states</option><option value="FIRING">Firing</option><option value="ACKNOWLEDGED">Acknowledged</option><option value="RESOLVED">Resolved</option></select><select v-model="severityFilter" @change="load()"><option value="">All severities</option><option value="CRITICAL">Critical</option><option value="WARNING">Warning</option><option value="INFO">Info</option></select><select v-model="serverFilter" @change="load()"><option value="">All servers</option><option v-for="server in servers.servers" :key="server.id" :value="server.id">{{ server.name }}</option></select></div><button class="refresh-button" @click="load()">{{ loading ? 'Refreshing…' : 'Refresh' }}</button></header>
       <div v-if="loading && !events.length" class="table-empty"><span class="loading-ring" /><strong>Loading incident timeline</strong></div>
       <div v-else-if="!events.length" class="table-empty alert-clear"><span>✓</span><strong>No alert events match this view</strong><small>When a configured condition remains true for its duration, its incident appears here.</small></div>
-      <div v-else class="alert-event-list"><article v-for="event in events" :key="event.id" :class="['alert-event-card', event.severity.toLowerCase(), event.status.toLowerCase()]"><div class="event-marker"><span>!</span><i /></div><div class="event-main"><header><div><span class="severity-pill" :class="event.severity.toLowerCase()">{{ event.severity }}</span><strong>{{ event.ruleName }}</strong></div><small>{{ age(event.startedAt) }}</small></header><p>{{ event.message }}</p><div class="event-meta"><span>{{ event.serverName }}</span><span>{{ event.resourceType }} · {{ event.resourceName }}</span><span>Started {{ formatTime(event.startedAt) }}</span><span>Webhook {{ event.notificationStatus }}</span></div></div><aside><span class="event-status" :class="event.status.toLowerCase()"><i />{{ event.status }}</span><button v-if="event.status === 'FIRING' && auth.hasAnyRole(['ADMIN','DEVELOPER'])" @click="acknowledge(event)">Acknowledge</button><small v-if="event.resolvedAt">Recovered<br />{{ formatTime(event.resolvedAt) }}</small><small v-else-if="event.acknowledgedAt">by {{ event.acknowledgedByName }}<br />{{ formatTime(event.acknowledgedAt) }}</small></aside></article></div>
+      <div v-else class="alert-event-list">
+        <article v-for="event in events" :key="event.id" :class="['alert-event-card', event.severity.toLowerCase(), event.status.toLowerCase()]">
+          <div class="event-marker"><span>!</span><i /></div>
+          <div class="event-main">
+            <header><div><span class="severity-pill" :class="event.severity.toLowerCase()">{{ event.severity }}</span><strong>{{ event.ruleName }}</strong></div><small>{{ age(event.startedAt) }}</small></header>
+            <p>{{ event.message }}</p>
+            <div class="event-meta"><span>{{ event.serverName }}</span><span>{{ event.resourceType }} · {{ event.resourceName }}</span><span>Started {{ formatTime(event.startedAt) }}</span><span>通知 {{ event.notificationStatus }}</span></div>
+            <div v-if="currentDeliveries(event).length" class="delivery-list"><span v-for="delivery in currentDeliveries(event)" :key="delivery.id" :class="delivery.status.toLowerCase()" :title="deliveryTitle(delivery)"><i />{{ delivery.routeName }} · {{ delivery.status }}</span></div>
+          </div>
+          <aside><span class="event-status" :class="event.status.toLowerCase()"><i />{{ event.status }}</span><button v-if="event.status === 'FIRING' && auth.hasAnyRole(['ADMIN','DEVELOPER'])" @click="acknowledge(event)">Acknowledge</button><small v-if="event.resolvedAt">Recovered<br />{{ formatTime(event.resolvedAt) }}</small><small v-else-if="event.acknowledgedAt">by {{ event.acknowledgedByName }}<br />{{ formatTime(event.acknowledgedAt) }}</small></aside>
+        </article>
+      </div>
     </article>
   </section>
 </template>
+
+<style scoped>
+.delivery-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.delivery-list span{display:inline-flex;align-items:center;gap:5px;padding:4px 7px;border:1px solid #dce6e1;border-radius:999px;background:#f7faf8;color:#64766d;font-size:8px;font-weight:700}.delivery-list i{width:5px;height:5px;border-radius:50%;background:currentColor}.delivery-list .succeeded{border-color:#cde7d9;background:#edf8f2;color:#2c7652}.delivery-list .muted{border-color:#eddcad;background:#fff8e5;color:#8a671c}.delivery-list .failed{border-color:#efcccc;background:#fff1f1;color:#a24b4b}.delivery-list .pending{border-color:#ccdcf0;background:#f0f6fd;color:#466f9e}
+</style>

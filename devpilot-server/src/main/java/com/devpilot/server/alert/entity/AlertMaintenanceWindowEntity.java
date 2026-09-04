@@ -7,20 +7,16 @@ import java.time.LocalDateTime;
 import lombok.Data;
 
 @Data
-@TableName("alert_notification")
-public class AlertNotificationEntity {
+@TableName("alert_maintenance_window")
+public class AlertMaintenanceWindowEntity {
     @TableId(type = IdType.ASSIGN_ID)
     private Long id;
-    private Long eventId;
-    private Long routeId;
-    private String routeName;
-    private String transitionType;
-    private String status;
-    private Integer attemptCount;
-    private Integer responseCode;
-    private String errorMessage;
-    private LocalDateTime nextAttemptAt;
-    private LocalDateTime sentAt;
+    private String name;
+    private String reason;
+    private Long serverId;
+    private LocalDateTime startsAt;
+    private LocalDateTime endsAt;
+    private Long createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

@@ -76,7 +76,7 @@ public class AlertSettingsService {
         }
     }
 
-    private static void validateUrl(String value) {
+    static void validateUrl(String value) {
         try {
             URI uri = new URI(value);
             if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))

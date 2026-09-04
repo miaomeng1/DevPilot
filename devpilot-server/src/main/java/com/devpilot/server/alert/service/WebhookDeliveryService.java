@@ -16,6 +16,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import lombok.RequiredArgsConstructor;
@@ -35,6 +36,7 @@ public class WebhookDeliveryService {
     private final AlertRuleMapper ruleMapper;
     private final ServerNodeMapper serverMapper;
     private final AlertSettingsService settingsService;
+    private final AlertRoutingService routingService;
     private final ObjectMapper objectMapper;
 
     @Scheduled(fixedDelayString = "${devpilot.alert.webhook-delivery-interval:5s}", initialDelayString = "${devpilot.alert.webhook-delivery-initial-delay:12s}")
@@ -46,18 +48,36 @@ public class WebhookDeliveryService {
     }
 
     private void deliver(AlertNotificationEntity notification, LocalDateTime now) {
-        if (!settingsService.isEnabled()) {
-            complete(notification, "SKIPPED", null, null, now);
-            return;
-        }
-        String url;
+        String url = null;
+        String destinationType;
         try {
-            url = settingsService.webhookUrl();
-            if (url == null) {
-                complete(notification, "SKIPPED", null, "Webhook URL is not configured", now);
+            AlertEventEntity event = eventMapper.selectById(notification.getEventId());
+            if (event == null) {
+                complete(notification, "SKIPPED", null, "Alert event no longer exists", now);
                 return;
             }
-            String payload = payload(notification, AlertSettingsService.destinationType(url));
+            if (notification.getRouteName() != null) {
+                AlertRoutingService.DeliveryTarget target = routingService.deliveryTarget(
+                        notification.getRouteId(), event, Instant.now());
+                if (target.muted()) {
+                    complete(notification, "MUTED", null, target.mutedReason(), now);
+                    return;
+                }
+                url = target.url();
+                destinationType = target.destinationType();
+            } else {
+                if (!settingsService.isEnabled()) {
+                    complete(notification, "SKIPPED", null, null, now);
+                    return;
+                }
+                url = settingsService.webhookUrl();
+                if (url == null) {
+                    complete(notification, "SKIPPED", null, "Webhook URL is not configured", now);
+                    return;
+                }
+                destinationType = AlertSettingsService.destinationType(url);
+            }
+            String payload = payload(notification, destinationType);
             HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json; charset=utf-8")
                     .header("User-Agent", "DevPilot/0.1 alert-webhook")
@@ -72,8 +92,9 @@ public class WebhookDeliveryService {
             Thread.currentThread().interrupt();
             fail(notification, null, "Webhook delivery was interrupted", now);
         } catch (Exception exception) {
-            log.warn("Alert webhook delivery {} failed: {}", notification.getId(), exception.getMessage());
-            fail(notification, null, safeMessage(exception), now);
+            String safeError = safeMessage(exception, url);
+            log.warn("Alert webhook delivery {} failed: {}", notification.getId(), safeError);
+            fail(notification, null, safeError, now);
         }
     }
 
@@ -151,9 +172,11 @@ public class WebhookDeliveryService {
         notificationMapper.updateById(notification);
     }
 
-    private static String safeMessage(Exception exception) {
+    private static String safeMessage(Exception exception, String webhookUrl) {
         String value = exception.getMessage();
-        return value == null || value.isBlank() ? exception.getClass().getSimpleName() : truncate(value, 1000);
+        if (value == null || value.isBlank()) return exception.getClass().getSimpleName();
+        if (webhookUrl != null && !webhookUrl.isBlank()) value = value.replace(webhookUrl, "[WEBHOOK]");
+        return truncate(value, 1000);
     }
 
     private static String truncate(String value, int max) {

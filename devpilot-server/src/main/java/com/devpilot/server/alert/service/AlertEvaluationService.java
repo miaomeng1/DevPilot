@@ -43,6 +43,7 @@ public class AlertEvaluationService {
     private final ServerMetricMapper metricMapper;
     private final DockerContainerSnapshotMapper containerMapper;
     private final ApplicationMapper applicationMapper;
+    private final AlertRoutingService routingService;
 
     @Scheduled(fixedDelayString = "${devpilot.alert.evaluation-interval:10s}", initialDelayString = "${devpilot.alert.evaluation-initial-delay:10s}")
     @Transactional
@@ -175,7 +176,7 @@ public class AlertEvaluationService {
             event.setStartedAt(state.getFirstMetAt());
             event.setUpdatedAt(now);
             eventMapper.insert(event);
-            queueNotification(event.getId(), "FIRING", now);
+            queueNotification(event, "FIRING", now);
         }
     }
 
@@ -195,15 +196,35 @@ public class AlertEvaluationService {
         event.setResolvedAt(now);
         event.setUpdatedAt(now);
         eventMapper.updateById(event);
-        queueNotification(event.getId(), "RESOLVED", now);
+        queueNotification(event, "RESOLVED", now);
     }
 
-    private void queueNotification(Long eventId, String transition, LocalDateTime now) {
+    private void queueNotification(AlertEventEntity event, String transition, LocalDateTime now) {
+        List<com.devpilot.server.alert.entity.AlertNotificationRouteEntity> routes =
+                routingService.matchingRoutes(event, transition);
+        if (!routes.isEmpty()) {
+            routes.forEach(route -> queueNotification(event.getId(), route.getId(), route.getName(),
+                    transition, "PENDING", null, now));
+            return;
+        }
+        if (routingService.hasEnabledRoutes()) {
+            queueNotification(event.getId(), null, "未匹配任何路由", transition, "SKIPPED",
+                    "没有启用的通知路由匹配该严重级别、服务器和状态变化", now);
+            return;
+        }
+        queueNotification(event.getId(), null, null, transition, "PENDING", null, now);
+    }
+
+    private void queueNotification(Long eventId, Long routeId, String routeName, String transition,
+                                   String status, String error, LocalDateTime now) {
         AlertNotificationEntity notification = new AlertNotificationEntity();
         notification.setEventId(eventId);
+        notification.setRouteId(routeId);
+        notification.setRouteName(routeName);
         notification.setTransitionType(transition);
-        notification.setStatus("PENDING");
+        notification.setStatus(status);
         notification.setAttemptCount(0);
+        notification.setErrorMessage(error);
         notification.setNextAttemptAt(now);
         notification.setCreatedAt(now);
         notification.setUpdatedAt(now);

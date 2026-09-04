@@ -1,6 +1,7 @@
 package com.devpilot.server.alert.service;
 
 import com.devpilot.server.alert.dto.AlertEventResponse;
+import com.devpilot.server.alert.dto.AlertDeliveryResponse;
 import com.devpilot.server.alert.dto.AlertSummaryResponse;
 import com.devpilot.server.alert.entity.AlertEventEntity;
 import com.devpilot.server.alert.entity.AlertNotificationEntity;
@@ -76,7 +77,7 @@ public class AlertEventService {
         ServerNodeEntity server = serverMapper.selectById(event.getServerId());
         UserEntity user = event.getAcknowledgedBy() == null ? null : userMapper.selectActiveById(event.getAcknowledgedBy());
         List<AlertNotificationEntity> notifications = notificationMapper.selectByEvent(event.getId());
-        String notificationStatus = notifications.isEmpty() ? "NONE" : notifications.get(0).getStatus();
+        String notificationStatus = notificationStatus(notifications);
         return new AlertEventResponse(event.getId().toString(), event.getRuleId().toString(),
                 rule == null ? "Deleted rule" : rule.getName(), rule == null ? null : rule.getMetricType(),
                 event.getServerId().toString(), server == null ? "Deleted server" : server.getName(),
@@ -85,7 +86,30 @@ public class AlertEventService {
                 rule == null ? null : rule.getThreshold(), rule == null ? null : rule.getOperator(),
                 event.getStartedAt(), event.getAcknowledgedBy() == null ? null : event.getAcknowledgedBy().toString(),
                 user == null ? null : user.getDisplayName(), event.getAcknowledgedAt(), event.getResolvedAt(),
-                event.getUpdatedAt(), notificationStatus);
+                event.getUpdatedAt(), notificationStatus, notifications.stream().map(this::toDelivery).toList());
+    }
+
+    private AlertDeliveryResponse toDelivery(AlertNotificationEntity notification) {
+        return new AlertDeliveryResponse(notification.getId(),
+                notification.getRouteName() == null ? "兼容 Webhook" : notification.getRouteName(),
+                notification.getTransitionType(), notification.getStatus(), notification.getAttemptCount(),
+                notification.getResponseCode(), notification.getErrorMessage(), notification.getSentAt(),
+                notification.getUpdatedAt());
+    }
+
+    private static String notificationStatus(List<AlertNotificationEntity> notifications) {
+        if (notifications.isEmpty()) return "NONE";
+        String transition = notifications.getFirst().getTransitionType();
+        List<AlertNotificationEntity> latest = notifications.stream()
+                .filter(notification -> transition.equals(notification.getTransitionType())).toList();
+        boolean succeeded = latest.stream().anyMatch(notification -> "SUCCEEDED".equals(notification.getStatus()));
+        boolean failed = latest.stream().anyMatch(notification -> "FAILED".equals(notification.getStatus()));
+        if (failed && succeeded) return "PARTIAL";
+        if (failed) return "FAILED";
+        if (latest.stream().anyMatch(notification -> "PENDING".equals(notification.getStatus()))) return "PENDING";
+        if (succeeded) return "SUCCEEDED";
+        if (latest.stream().anyMatch(notification -> "MUTED".equals(notification.getStatus()))) return "MUTED";
+        return latest.getFirst().getStatus();
     }
 
     private static void validateFilter(String value, String... allowed) {

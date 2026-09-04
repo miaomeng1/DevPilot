@@ -1,6 +1,7 @@
 package com.devpilot.server.alert.dto;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 public record AlertEventResponse(
         String id,
@@ -24,5 +25,6 @@ public record AlertEventResponse(
         LocalDateTime acknowledgedAt,
         LocalDateTime resolvedAt,
         LocalDateTime updatedAt,
-        String notificationStatus) {
+        String notificationStatus,
+        List<AlertDeliveryResponse> deliveries) {
 }

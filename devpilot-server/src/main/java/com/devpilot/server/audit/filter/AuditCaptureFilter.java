@@ -33,7 +33,7 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 @RequiredArgsConstructor
 public class AuditCaptureFilter extends OncePerRequestFilter {
 
-    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|users|installations)/(\\d+)");
+    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|routes|maintenance-windows|users|installations)/(\\d+)");
     private final AuditLogService auditService;
     private final ObjectMapper objectMapper;
 
@@ -132,7 +132,8 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
             return true;
         }
         return lower.contains("password") || (lower.contains("token") && !lower.contains("ttl")) || lower.contains("secret")
-                || (path.contains("webhook") && lower.equals("url"));
+                || (path.contains("webhook") && lower.equals("url"))
+                || (path.startsWith("/api/alerts/routes") && lower.equals("webhookurl"));
     }
 
     private JsonNode parse(byte[] content) {
@@ -181,6 +182,8 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.startsWith("/api/applications")) return "APPLICATION";
         if (path.startsWith("/api/nginx")) return "NGINX_CONFIG";
         if (path.startsWith("/api/alerts/rules")) return "ALERT_RULE";
+        if (path.startsWith("/api/alerts/routes")) return "ALERT_ROUTE";
+        if (path.startsWith("/api/alerts/maintenance-windows")) return "MAINTENANCE_WINDOW";
         if (path.startsWith("/api/alerts")) return "ALERT_EVENT";
         if (path.startsWith("/api/users")) return "USER";
         if (path.startsWith("/api/settings")) return "SYSTEM_SETTING";
@@ -211,6 +214,13 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.equals("/api/alerts/rules") && "POST".equals(method)) return "CREATE_ALERT_RULE";
         if (path.matches("/api/alerts/rules/\\d+") && "PUT".equals(method)) return "UPDATE_ALERT_RULE";
         if (path.matches("/api/alerts/rules/\\d+") && "DELETE".equals(method)) return "DELETE_ALERT_RULE";
+        if (path.equals("/api/alerts/routes") && "POST".equals(method)) return "CREATE_ALERT_ROUTE";
+        if (path.matches("/api/alerts/routes/\\d+") && "PUT".equals(method)) return "UPDATE_ALERT_ROUTE";
+        if (path.matches("/api/alerts/routes/\\d+") && "DELETE".equals(method)) return "DELETE_ALERT_ROUTE";
+        if (path.equals("/api/alerts/maintenance-windows") && "POST".equals(method)) return "CREATE_MAINTENANCE_WINDOW";
+        if (path.matches("/api/alerts/maintenance-windows/\\d+") && "DELETE".equals(method)) {
+            return "DELETE_MAINTENANCE_WINDOW";
+        }
         if (path.matches("/api/alerts/\\d+/acknowledge")) return "ACKNOWLEDGE_ALERT";
         if (path.equals("/api/alerts/webhook")) return "UPDATE_WEBHOOK";
         if (path.equals("/api/users") && "POST".equals(method)) return "CREATE_USER";
