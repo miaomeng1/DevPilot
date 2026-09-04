@@ -11,6 +11,7 @@ import com.devpilot.server.node.mapper.AgentTokenMapper;
 import com.devpilot.server.node.mapper.ServerNodeMapper;
 import com.devpilot.server.security.DevPilotPrincipal;
 import com.devpilot.server.security.SecretHashing;
+import com.devpilot.server.servicecatalog.mapper.ServiceInstallationMapper;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -30,6 +31,7 @@ public class ServerNodeService {
     private final ServerNodeMapper serverNodeMapper;
     private final AgentTokenMapper agentTokenMapper;
     private final AgentProperties agentProperties;
+    private final ServiceInstallationMapper serviceInstallationMapper;
 
     public List<ServerNodeResponse> list() {
         return serverNodeMapper.selectAllActive().stream().map(ServerNodeResponse::from).toList();
@@ -77,6 +79,9 @@ public class ServerNodeService {
         ServerNodeEntity node = serverNodeMapper.selectActiveById(id);
         if (node == null) {
             throw BusinessException.notFound(40401, "服务器不存在");
+        }
+        if (serviceInstallationMapper.countInProgressByServer(id) > 0) {
+            throw BusinessException.conflict(40967, "服务器仍有进行中的服务模板安装，请等待任务结束");
         }
         agentTokenMapper.revokeByServer(id, LocalDateTime.now(ZoneOffset.UTC));
         serverNodeMapper.deleteById(id);

@@ -58,6 +58,12 @@ const router = createRouter({
           meta: { title: 'Application detail' },
         },
         {
+          path: 'templates',
+          name: 'service-templates',
+          component: () => import('@/views/ServiceTemplatesView.vue'),
+          meta: { title: '个人服务模板' },
+        },
+        {
           path: 'cicd',
           name: 'cicd',
           component: () => import('@/views/CicdView.vue'),

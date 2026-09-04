@@ -214,7 +214,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
   <section class="applications-view">
     <header class="page-heading applications-heading">
       <div><p class="eyebrow">服务目录 · SERVICE CATALOG</p><h1>应用工作台</h1><span>把镜像、容器、端口、健康检查与发布记录组织成可管理的服务。</span></div>
-      <div class="heading-actions"><RouterLink class="secondary-compact" to="/cicd">进入发布中心 CI/CD</RouterLink><button v-if="canManage" class="primary-compact" type="button" @click="openDialog()"><b>＋</b>登记应用</button></div>
+      <div class="heading-actions"><RouterLink class="secondary-compact" to="/templates">一键模板 Templates</RouterLink><RouterLink class="secondary-compact" to="/cicd">进入发布中心 CI/CD</RouterLink><button v-if="canManage" class="primary-compact" type="button" @click="openDialog()"><b>＋</b>登记应用</button></div>
     </header>
     <p v-if="errorMessage && !dialogOpen" class="inline-error">{{ errorMessage }}</p>
 

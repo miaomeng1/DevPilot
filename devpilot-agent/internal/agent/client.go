@@ -62,6 +62,14 @@ type DockerCommand struct {
 	Follow       bool   `json:"follow"`
 }
 
+type ServiceInstallTask struct {
+	InstallationID string `json:"installationId"`
+	TemplateID     string `json:"templateId"`
+	InstanceName   string `json:"instanceName"`
+	HostPort       int    `json:"hostPort"`
+	Timezone       string `json:"timezone"`
+}
+
 type HealthTask struct {
 	ApplicationID  string `json:"applicationId"`
 	HealthCheckURL string `json:"healthCheckUrl"`
@@ -161,6 +169,33 @@ func (c *Client) CompleteDockerCommand(ctx context.Context, commandID string, ex
 	}{Status: status, ErrorMessage: errorMessage}
 	_, err := doJSON[struct{}](ctx, c, http.MethodPost,
 		"/api/agent/docker/commands/"+commandID+"/result", payload, true)
+	return err
+}
+
+func (c *Client) NextServiceInstall(ctx context.Context) (*ServiceInstallTask, error) {
+	return doJSON[*ServiceInstallTask](ctx, c, http.MethodGet,
+		"/api/agent/service-templates/installations/next", struct{}{}, true)
+}
+
+func (c *Client) CompleteServiceInstall(ctx context.Context, installationID, containerID string,
+	executeErr error) error {
+	status := "SUCCEEDED"
+	errorMessage := ""
+	if executeErr != nil {
+		status = "FAILED"
+		containerID = ""
+		errorMessage = executeErr.Error()
+		if len(errorMessage) > 1000 {
+			errorMessage = errorMessage[:1000]
+		}
+	}
+	payload := struct {
+		Status       string `json:"status"`
+		ContainerID  string `json:"containerId,omitempty"`
+		ErrorMessage string `json:"errorMessage,omitempty"`
+	}{Status: status, ContainerID: containerID, ErrorMessage: errorMessage}
+	_, err := doJSON[struct{}](ctx, c, http.MethodPost,
+		"/api/agent/service-templates/installations/"+installationID+"/result", payload, true)
 	return err
 }
 

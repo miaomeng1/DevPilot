@@ -33,7 +33,7 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
 @RequiredArgsConstructor
 public class AuditCaptureFilter extends OncePerRequestFilter {
 
-    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|users)/(\\d+)");
+    private static final Pattern NUMERIC_ID = Pattern.compile("/(?:servers|containers|applications|configs|rules|users|installations)/(\\d+)");
     private final AuditLogService auditService;
     private final ObjectMapper objectMapper;
 
@@ -185,6 +185,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.startsWith("/api/users")) return "USER";
         if (path.startsWith("/api/settings")) return "SYSTEM_SETTING";
         if (path.startsWith("/api/cicd")) return "CICD";
+        if (path.startsWith("/api/service-templates")) return "SERVICE_TEMPLATE";
         if (path.startsWith("/api/auth")) return "AUTH_SESSION";
         return "API";
     }
@@ -225,6 +226,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.matches("/api/cicd/applications/\\d+/deployments/\\d+/rollback")) return "ROLLBACK_DEPLOYMENT";
         if (path.matches("/api/cicd/applications/\\d+/deployments/\\d+/promote")) return "PROMOTE_DEPLOYMENT";
         if (path.matches("/api/cicd/applications/\\d+/previews/\\d+")) return "DELETE_PREVIEW_ENVIRONMENT";
+        if (path.matches("/api/service-templates/[^/]+/installations")) return "INSTALL_SERVICE_TEMPLATE";
         return method + "_API";
     }
 

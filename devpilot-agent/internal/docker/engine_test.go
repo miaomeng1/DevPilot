@@ -2,9 +2,11 @@ package docker
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 )
 
 func TestLineWriterFramesPartialLines(t *testing.T) {
@@ -45,5 +47,49 @@ func TestCPUPercentAndMemoryWorkingSet(t *testing.T) {
 	}
 	if got := memoryUsage(stats); got != 800 {
 		t.Fatalf("memoryUsage() = %v, want 800", got)
+	}
+}
+
+func TestServiceTemplateSecurityDefaults(t *testing.T) {
+	for templateID, spec := range serviceTemplates {
+		if strings.HasSuffix(spec.image, ":latest") || !strings.Contains(spec.image, ":") {
+			t.Fatalf("template %s image is not version-pinned: %s", templateID, spec.image)
+		}
+		mounts := []mount.Mount{{Type: mount.TypeVolume, Source: "devpilot-test-data", Target: "/data"}}
+		config, hostConfig := buildTemplateConfiguration(templateID, "personal-service", "Asia/Shanghai",
+			12345, spec, mounts)
+		if config.Image != spec.image || config.Labels["com.devpilot.managed"] != "true" {
+			t.Fatalf("template %s missing pinned image or ownership label", templateID)
+		}
+		for _, bindings := range hostConfig.PortBindings {
+			if len(bindings) != 1 || bindings[0].HostIP != "127.0.0.1" || bindings[0].HostPort != "12345" {
+				t.Fatalf("template %s has unsafe port binding: %#v", templateID, bindings)
+			}
+		}
+		if hostConfig.Privileged || hostConfig.Resources.Memory <= 0 ||
+			!reflect.DeepEqual(hostConfig.SecurityOpt, []string{"no-new-privileges:true"}) {
+			t.Fatalf("template %s has unsafe runtime defaults", templateID)
+		}
+		if hostConfig.LogConfig.Config["max-size"] != "10m" || hostConfig.LogConfig.Config["max-file"] != "3" {
+			t.Fatalf("template %s does not bound container logs", templateID)
+		}
+	}
+}
+
+func TestServiceTemplateInputValidation(t *testing.T) {
+	for _, value := range []string{"Asia/Shanghai", "UTC", "America/New_York", "Etc/GMT+8"} {
+		if !validTimezone(value) {
+			t.Fatalf("validTimezone(%q) = false", value)
+		}
+	}
+	for _, value := range []string{"", "/UTC", "../UTC", "Asia//Shanghai", "Asia/Shanghai;rm"} {
+		if validTimezone(value) {
+			t.Fatalf("validTimezone(%q) = true", value)
+		}
+	}
+	for _, value := range []string{"UPPER", "ab", "-bad", "bad_name", strings.Repeat("a", 65)} {
+		if instanceNamePattern.MatchString(value) {
+			t.Fatalf("instance name %q unexpectedly accepted", value)
+		}
 	}
 }

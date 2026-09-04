@@ -24,6 +24,16 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `POST /api/docker/containers/{id}/logs/ticket`
 - Browser stream: `/ws/logs`; Agent relay: `/ws/agent/logs`
 
+## One-click service templates
+
+- `GET /api/service-templates` — curated template catalog and explicit image versions.
+- `GET /api/service-templates/installations` — durable installation history and current stage.
+- `POST /api/service-templates/{templateId}/installations` — ADMIN-only asynchronous installation request.
+- `GET /api/agent/service-templates/installations/next` — authenticated Agent task claim.
+- `POST /api/agent/service-templates/installations/{id}/result` — authenticated typed execution result.
+
+The browser request accepts only a catalog ID, validated instance name, online server, environment, loopback port, and IANA timezone. The Agent owns the allow-listed runtime specification; no API accepts an image override, Compose document, host path, privileged flag, or shell command. Successful installation is not reported as `READY` until the created container appears in a fresh Docker snapshot and DevPilot registers its application record.
+
 ## CI/CD
 
 - `GET|PUT /api/cicd/configurations/{applicationId}`

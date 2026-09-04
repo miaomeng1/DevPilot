@@ -32,6 +32,7 @@ const navigation = computed(() => [
   { label: '服务器 Servers', code: 'SV', to: '/servers' },
   { label: 'Docker', code: 'DK', to: '/docker' },
   { label: '应用 Applications', code: 'AP', to: '/applications' },
+  { label: '模板 Templates', code: 'TM', to: '/templates' },
   { label: '发布 CI/CD', code: 'CI', to: '/cicd' },
   { label: 'Nginx', code: 'NX', to: '/nginx' },
   { label: '监控 Monitor', code: 'MN', to: '/monitor' },

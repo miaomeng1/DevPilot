@@ -56,6 +56,17 @@ func TestRegisterAndHeartbeat(t *testing.T) {
 			_, _ = writer.Write([]byte(`{"code":0,"message":"success","data":{"commandId":"84","containerId":"abc","action":"RESTART"}}`))
 		case "/api/agent/docker/commands/84/result":
 			_, _ = writer.Write([]byte(`{"code":0,"message":"success","data":null}`))
+		case "/api/agent/service-templates/installations/next":
+			_, _ = writer.Write([]byte(`{"code":0,"message":"success","data":{"installationId":"97","templateId":"uptime-kuma","instanceName":"personal-uptime","hostPort":3001,"timezone":"Asia/Shanghai"}}`))
+		case "/api/agent/service-templates/installations/97/result":
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode service install result: %v", err)
+			}
+			if payload["status"] != "SUCCEEDED" || payload["containerId"] != "abcdef123456" {
+				t.Fatalf("unexpected service install result: %#v", payload)
+			}
+			_, _ = writer.Write([]byte(`{"code":0,"message":"success","data":null}`))
 		case "/api/agent/applications/health/next":
 			_, _ = writer.Write([]byte(`{"code":0,"message":"success","data":{"applicationId":"21","healthCheckUrl":"http://127.0.0.1:8080/health","timeoutSeconds":5}}`))
 		case "/api/agent/applications/health/21/result":
@@ -108,6 +119,15 @@ func TestRegisterAndHeartbeat(t *testing.T) {
 	}
 	if err := client.CompleteDockerCommand(context.Background(), command.CommandID, nil); err != nil {
 		t.Fatalf("CompleteDockerCommand() error = %v", err)
+	}
+	installTask, err := client.NextServiceInstall(context.Background())
+	if err != nil || installTask == nil || installTask.InstallationID != "97" ||
+		installTask.TemplateID != "uptime-kuma" || installTask.HostPort != 3001 {
+		t.Fatalf("NextServiceInstall() = %#v, %v", installTask, err)
+	}
+	if err := client.CompleteServiceInstall(context.Background(), installTask.InstallationID,
+		"abcdef123456", nil); err != nil {
+		t.Fatalf("CompleteServiceInstall() error = %v", err)
 	}
 	healthTask, err := client.NextHealthTask(context.Background())
 	if err != nil || healthTask == nil || healthTask.ApplicationID != "21" {

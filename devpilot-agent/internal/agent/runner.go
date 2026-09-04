@@ -40,6 +40,8 @@ func Run(ctx context.Context, client *Client, collector *metrics.Collector, dock
 	healthTicker := time.NewTicker(5 * time.Second)
 	nginxTicker := time.NewTicker(collectInterval)
 	nginxCommandTicker := time.NewTicker(2 * time.Second)
+	templateTicker := time.NewTicker(2 * time.Second)
+	templateSlot := make(chan struct{}, 1)
 	defer heartbeatTicker.Stop()
 	defer metricsTicker.Stop()
 	defer dockerTicker.Stop()
@@ -47,6 +49,7 @@ func Run(ctx context.Context, client *Client, collector *metrics.Collector, dock
 	defer healthTicker.Stop()
 	defer nginxTicker.Stop()
 	defer nginxCommandTicker.Stop()
+	defer templateTicker.Stop()
 	_, _ = sendHeartbeat(ctx, client, logger)
 	collectAndUpload(ctx, client, collector, logger)
 	collectAndUploadDocker(ctx, client, dockerEngine, logger)
@@ -85,7 +88,72 @@ func Run(ctx context.Context, client *Client, collector *metrics.Collector, dock
 			collectAndUploadNginx(ctx, client, nginxManager, logger)
 		case <-nginxCommandTicker.C:
 			pollNginxCommand(ctx, client, nginxManager, logger)
+		case <-templateTicker.C:
+			select {
+			case templateSlot <- struct{}{}:
+				go func() {
+					defer func() { <-templateSlot }()
+					pollServiceInstall(ctx, client, dockerEngine, logger)
+				}()
+			default:
+			}
 		}
+	}
+}
+
+func pollServiceInstall(ctx context.Context, client *Client, engine *dockerengine.Engine, logger *slog.Logger) {
+	if engine == nil {
+		return
+	}
+	task, err := client.NextServiceInstall(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Warn("service template install poll failed", "error", err)
+		}
+		return
+	}
+	if task == nil {
+		return
+	}
+	executeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	containerID, executeErr := engine.InstallTemplate(executeCtx, task.TemplateID, task.InstanceName,
+		task.HostPort, task.Timezone)
+	reportServiceInstallResult(ctx, client, task.InstallationID, containerID, executeErr, logger)
+	if executeErr != nil {
+		logger.Warn("service template install failed", "installationId", task.InstallationID,
+			"templateId", task.TemplateID, "error", executeErr)
+		return
+	}
+	logger.Info("service template install succeeded", "installationId", task.InstallationID,
+		"templateId", task.TemplateID, "containerId", containerID)
+	collectAndUploadDocker(ctx, client, engine, logger)
+}
+
+func reportServiceInstallResult(ctx context.Context, client *Client, installationID, containerID string,
+	executeErr error, logger *slog.Logger) {
+	backoff := time.Second
+	for attempt := 1; attempt <= 5; attempt++ {
+		reportErr := client.CompleteServiceInstall(ctx, installationID, containerID, executeErr)
+		if reportErr == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if attempt == 5 {
+			logger.Warn("service template install result upload failed", "installationId", installationID,
+				"attempts", attempt, "error", reportErr)
+			return
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		backoff *= 2
 	}
 }
 

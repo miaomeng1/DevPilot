@@ -8,7 +8,8 @@
 | --- | --- | --- |
 | [Coolify](https://coolify.io/docs/get-started/concepts) | 项目/环境/资源层级、Git 与镜像部署、自动域名证书、通知、备份 | 保留部署平台集成，避免重复实现完整 PaaS；强化统一状态与操作入口 |
 | [Dokploy](https://docs.dokploy.com/docs/core/backups) | 应用与数据库管理、S3 备份/恢复、部署并发、监控 | 优先补齐可验证备份、恢复演练和个人服务器容量保护 |
-| [Portainer](https://docs.portainer.io/user/docker/stacks/webhooks) | Docker 清单、Stack、Registry 与 Webhook 更新 | 强化自动发现和从现有容器快速纳管，不开放任意 Shell |
+| [Portainer](https://docs.portainer.io/user/docker/templates) | App Templates、Docker 清单、Stack 与 Registry | 采用可搜索目录和显式参数，但仅执行内置白名单模板，不开放任意 Shell |
+| [CapRover](https://caprover.com/docs/one-click-apps) | 模板变量、持久目录与 Docker API 转换 | 借鉴低步骤安装，同时把公网端口、资源上限和应用纳管做成安全默认值 |
 | [Argo CD](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/) | 期望状态、差异检测、自动同步、自愈与重试 | 在非 Kubernetes 场景引入“期望镜像 vs 实际容器”的漂移检测 |
 | [GitHub Actions](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments) | Environment、审批、并发控制、部署记录 | 继续让 CI 平台负责构建门禁，DevPilot 负责部署编排、验证与审计 |
 | [GitLab CI/CD](https://docs.gitlab.com/ci/environments/) | 环境历史、受保护变量、资源组并发和自动回滚 | 对 GitLab 保持同等接入体验，并统一展示两种 CI Provider 的部署证据 |
@@ -49,7 +50,7 @@
 - [x] Pull Request / Merge Request Preview 临时环境、独立密钥、TTL 与关闭后自动回收
 - [x] 环境变量模板、Revision 差异预览、全量加密与 Coolify 安全增量同步
 - [x] Compose 项目（Stack）自动分组、关联服务视图与可审计的顺序重启
-- [ ] 常用个人服务模板，但模板默认不暴露高风险端口
+- [x] 常用个人服务模板：白名单镜像、回环端口、持久卷、资源上限与自动纳管
 
 ### P3 · 多机与扩展
 

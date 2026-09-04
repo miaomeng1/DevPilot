@@ -34,6 +34,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **健康检查与回滚**：部署完成后等待新的 Agent 探测；失败时保留旧版本并自动回滚
 - **应用工作台**：关联镜像、容器、服务器、容器 IP、宿主机端口、Access URL 和 Health URL
 - **自动发现与行动中心**：识别尚未纳管的容器并预填应用信息，首页直接提示当前异常和下一步操作
+- **个人服务模板**：一键安装 Uptime Kuma、Gitea、Audiobookshelf；固定版本、命名卷、资源上限，Web 端口默认仅绑定 `127.0.0.1`
 - **服务器监控**：CPU、负载、内存、磁盘、网络及 1h / 6h / 24h / 7d 趋势
 - **磁盘水位保护**：80% 预警、90% 高危；95% 或低于 2 GiB 时暂停新发布，空间恢复后自动继续
 - **Docker 管理**：容器发现、资源统计、启动、停止、重启、删除以及实时 WebSocket 日志
@@ -125,6 +126,18 @@ Web 镜像在 `/downloads/` 提供带校验和的 amd64 / arm64 Agent 二进制�
 
 详细配置见 [CI/CD 指南](docs/cicd.md)。
 
+## 一键安装个人服务
+
+Agent 上线并成功上报 Docker 状态后，进入 **模板 Templates**：
+
+1. 选择 Uptime Kuma、Gitea 或 Audiobookshelf。
+2. 选择在线服务器，确认实例名、回环端口、环境和时区。
+3. Agent 使用 Docker API 拉取显式版本镜像，创建受标记的持久卷和有资源上限的容器。
+4. 容器被下一次清单发现后，DevPilot 自动登记应用并开启健康检查。
+5. 验证服务可用后，再在 **Nginx** 中配置域名与 HTTPS。
+
+模板不会执行任意 Compose 或 Shell，也不会公开绑定数据库、SSH 或管理端口。持久卷不等于备份；升级前仍需阅读上游发布说明并验证恢复流程。详细说明见 [个人服务模板](docs/service-templates.md)。
+
 ## 本地开发 Development
 
 要求：Java 21+、Maven 3.9+、Node.js 22+、Go 1.24+、MySQL 8、Redis 7。
@@ -190,5 +203,6 @@ cd devpilot-agent && go test ./...
 - [系统架构](docs/architecture.md)
 - [部署指南](docs/deployment.md)
 - [CI/CD 指南](docs/cicd.md)
+- [个人服务模板](docs/service-templates.md)
 - [API Map](docs/api.md)
 - [产品路线图与竞品取舍](docs/product-roadmap.md)

@@ -38,6 +38,8 @@ GitHub / GitLab
 
 `devpilot-agent` is a single static binary. It registers once with a high-entropy token, then authenticates every Agent request independently. The control plane queues typed Docker/Nginx work; the Agent polls, validates the enum and resource identifiers, executes through a dedicated adapter, and returns a typed result. No request carries a shell command.
 
+One-click services preserve that boundary. The browser sends only an allow-listed template ID and constrained settings. The Agent keeps its own matching runtime catalog, uses the Docker SDK to pull an explicit image version, creates named volumes, applies loopback-only port bindings plus memory/log limits, and returns the created container ID. A fresh Docker snapshot is required before the control plane creates the corresponding application record.
+
 ## Primary data flows
 
 ### Registration and telemetry
