@@ -5,6 +5,8 @@ import com.devpilot.server.cicd.dto.CicdConfigurationResponse;
 import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.CicdReadinessResponse;
+import com.devpilot.server.cicd.dto.CicdPromotionRequest;
+import com.devpilot.server.cicd.dto.CicdPromotionTargetResponse;
 import com.devpilot.server.cicd.dto.PipelineRunResponse;
 import com.devpilot.server.cicd.dto.ApplicationEnvironmentResponse;
 import com.devpilot.server.cicd.dto.SaveApplicationEnvironmentRequest;
@@ -67,6 +69,11 @@ public class CicdController {
         return ApiResponse.success(readinessService.inspect(applicationId));
     }
 
+    @GetMapping("/applications/{applicationId}/promotion-targets")
+    public ApiResponse<List<CicdPromotionTargetResponse>> promotionTargets(@PathVariable Long applicationId) {
+        return ApiResponse.success(deploymentService.promotionTargets(applicationId));
+    }
+
     @GetMapping("/applications/{applicationId}/environment")
     public ApiResponse<ApplicationEnvironmentResponse> environment(@PathVariable Long applicationId) {
         return ApiResponse.success(environmentService.get(applicationId));
@@ -100,6 +107,17 @@ public class CicdController {
             @PathVariable Long deploymentId,
             @AuthenticationPrincipal DevPilotPrincipal principal) {
         return ApiResponse.success(deploymentService.rollback(applicationId, deploymentId, principal));
+    }
+
+    @PostMapping("/applications/{applicationId}/deployments/{deploymentId}/promote")
+    @PreAuthorize("hasAnyRole('ADMIN','DEVELOPER')")
+    public ApiResponse<CicdDeploymentResponse> promote(
+            @PathVariable Long applicationId,
+            @PathVariable Long deploymentId,
+            @Valid @RequestBody CicdPromotionRequest request,
+            @AuthenticationPrincipal DevPilotPrincipal principal) {
+        return ApiResponse.success(deploymentService.promote(
+                applicationId, deploymentId, request.targetApplicationId(), principal));
     }
 
     @PostMapping("/webhooks/{applicationCode}")

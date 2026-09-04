@@ -223,6 +223,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         }
         if (path.matches("/api/cicd/applications/\\d+/environment/sync")) return "SYNC_APPLICATION_ENVIRONMENT";
         if (path.matches("/api/cicd/applications/\\d+/deployments/\\d+/rollback")) return "ROLLBACK_DEPLOYMENT";
+        if (path.matches("/api/cicd/applications/\\d+/deployments/\\d+/promote")) return "PROMOTE_DEPLOYMENT";
         return method + "_API";
     }
 

@@ -71,7 +71,9 @@ export interface CicdDeployment {
   applicationId: string
   pipelineRunId: string | null
   rollbackOfId: string | null
-  deploymentKind: 'RELEASE' | 'ROLLBACK'
+  promotedFromApplicationId: string | null
+  promotedFromDeploymentId: string | null
+  deploymentKind: 'RELEASE' | 'ROLLBACK' | 'PROMOTION'
   provider: DeploymentProvider
   imageUri: string
   previousImageUri: string | null
@@ -91,7 +93,9 @@ export interface CicdActivity {
   environment: string
   serverId: string | null
   serverName: string
-  deploymentKind: 'RELEASE' | 'ROLLBACK'
+  deploymentKind: 'RELEASE' | 'ROLLBACK' | 'PROMOTION'
+  promotedFromApplicationId: string | null
+  promotedFromDeploymentId: string | null
   provider: DeploymentProvider
   imageUri: string
   status: CicdDeployment['status']
@@ -139,6 +143,18 @@ export interface CicdReadiness {
   checks: CicdReadinessCheck[]
 }
 
+export interface CicdPromotionTarget {
+  applicationId: string
+  applicationName: string
+  environment: 'TEST' | 'STAGING' | 'PRODUCTION'
+  serverId: string
+  serverName: string
+  accessUrl: string | null
+  ready: boolean
+  blockers: string[]
+  currentHealthyImage: string | null
+}
+
 export interface SaveApplicationEnvironmentPayload {
   expectedRevision: number
   variables: Array<{ key: string; value: string | null; secret: boolean; description: string }>
@@ -163,6 +179,16 @@ export const cicdApi = {
   },
   async readiness(applicationId: string) {
     const response = await apiClient.get<ApiResponse<CicdReadiness>>(`/cicd/applications/${applicationId}/readiness`)
+    return response.data.data
+  },
+  async promotionTargets(applicationId: string) {
+    const response = await apiClient.get<ApiResponse<CicdPromotionTarget[]>>(`/cicd/applications/${applicationId}/promotion-targets`)
+    return response.data.data
+  },
+  async promote(applicationId: string, deploymentId: string, targetApplicationId: string) {
+    const response = await apiClient.post<ApiResponse<CicdDeployment>>(
+      `/cicd/applications/${applicationId}/deployments/${deploymentId}/promote`, { targetApplicationId },
+    )
     return response.data.data
   },
   async activity(limit = 20) {

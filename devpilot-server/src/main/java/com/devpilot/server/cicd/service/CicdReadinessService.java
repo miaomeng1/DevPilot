@@ -25,6 +25,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -76,12 +77,28 @@ public class CicdReadinessService {
     }
 
     public String blockingReason(Long applicationId) {
-        List<CicdReadinessCheckResponse> blockers = inspect(applicationId).checks().stream()
-                .filter(check -> "BLOCK".equals(check.status())).toList();
+        return blockingReason(applicationId, Set.of());
+    }
+
+    public List<CicdReadinessCheckResponse> promotionBlockers(Long applicationId) {
+        return blockers(applicationId, Set.of("AUTOMATION", "ARTIFACT"));
+    }
+
+    public String promotionBlockingReason(Long applicationId) {
+        return blockingReason(applicationId, Set.of("AUTOMATION", "ARTIFACT"));
+    }
+
+    private String blockingReason(Long applicationId, Set<String> ignoredCodes) {
+        List<CicdReadinessCheckResponse> blockers = blockers(applicationId, ignoredCodes);
         if (blockers.isEmpty()) return null;
         return "发布前检查未通过：" + blockers.stream()
                 .map(check -> check.title() + "（" + check.detail() + "）")
                 .reduce((left, right) -> left + "；" + right).orElse("存在阻断项");
+    }
+
+    private List<CicdReadinessCheckResponse> blockers(Long applicationId, Set<String> ignoredCodes) {
+        return inspect(applicationId).checks().stream()
+                .filter(check -> "BLOCK".equals(check.status()) && !ignoredCodes.contains(check.code())).toList();
     }
 
     private static CicdReadinessCheckResponse configurationCheck(CicdConfigurationEntity configuration) {

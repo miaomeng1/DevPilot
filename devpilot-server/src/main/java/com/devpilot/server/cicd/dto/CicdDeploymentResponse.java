@@ -7,6 +7,8 @@ public record CicdDeploymentResponse(
         Long applicationId,
         Long pipelineRunId,
         Long rollbackOfId,
+        Long promotedFromApplicationId,
+        Long promotedFromDeploymentId,
         String deploymentKind,
         String provider,
         String imageUri,

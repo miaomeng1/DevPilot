@@ -444,6 +444,88 @@ class CicdIntegrationTests {
     }
 
     @Test
+    void healthyStagingArtifactPromotesToProductionWithoutRebuild() throws Exception {
+        Fixture fixture = createApplication("STAGING");
+        Long serverId = jdbcTemplate.queryForObject("SELECT server_id FROM application WHERE id = ?", Long.class,
+                Long.parseLong(fixture.applicationId()));
+        Long containerId = jdbcTemplate.queryForObject("SELECT container_snapshot_id FROM application WHERE id = ?",
+                Long.class, Long.parseLong(fixture.applicationId()));
+        MvcResult production = mockMvc.perform(post("/api/applications")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"name":"Demo Production","code":"demo-prod","environment":"PRODUCTION",
+                                 "serverId":"%s","containerSnapshotId":"%s",
+                                 "healthCheckUrl":"http://127.0.0.1:8080/actuator/health",
+                                 "accessUrl":"https://demo.example.com"}
+                                """.formatted(serverId, containerId)))
+                .andExpect(status().isOk()).andReturn();
+        String productionId = data(production).path("id").asText();
+
+        MvcResult stagingConfiguration = configureWebhook(
+                fixture, fixture.applicationId(), "https://coolify.example/deploy/staging", true);
+        configureWebhook(fixture, productionId, "https://coolify.example/deploy/production", false);
+        String secret = data(stagingConfiguration).path("oneTimeCallbackSecret").asText();
+        String image = "ghcr.io/acme/demo:sha-eeeeeeeeeeee";
+        submitSuccessfulCallback(secret, "run-staging", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", image);
+        reportHealth(fixture, "HEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        Long sourceDeploymentId = jdbcTemplate.queryForObject(
+                "SELECT id FROM cicd_deployment WHERE application_id = ? AND status = 'HEALTHY'", Long.class,
+                Long.parseLong(fixture.applicationId()));
+
+        mockMvc.perform(get("/api/cicd/applications/{id}/promotion-targets", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()", is(1)))
+                .andExpect(jsonPath("$.data[0].applicationId", is(productionId)))
+                .andExpect(jsonPath("$.data[0].environment", is("PRODUCTION")))
+                .andExpect(jsonPath("$.data[0].ready", is(true)));
+
+        mockMvc.perform(post("/api/cicd/applications/{applicationId}/deployments/{deploymentId}/promote",
+                        fixture.applicationId(), sourceDeploymentId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetApplicationId\":\"%s\"}".formatted(productionId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.applicationId", is(productionId)))
+                .andExpect(jsonPath("$.data.deploymentKind", is("PROMOTION")))
+                .andExpect(jsonPath("$.data.promotedFromApplicationId", is(fixture.applicationId())))
+                .andExpect(jsonPath("$.data.promotedFromDeploymentId", is(sourceDeploymentId.toString())))
+                .andExpect(jsonPath("$.data.imageUri", is(image)))
+                .andExpect(jsonPath("$.data.status", is("TRIGGERED")));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/staging", null, null, null, image);
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/production", null, null, null, image);
+
+        jdbcTemplate.update("UPDATE cicd_deployment SET started_at = ? WHERE application_id = ?",
+                LocalDateTime.now(ZoneOffset.UTC).minusSeconds(20), Long.parseLong(productionId));
+        mockMvc.perform(post("/api/agent/applications/health/{id}/result", productionId)
+                        .header("X-DevPilot-Agent-Token", fixture.agentToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"HEALTHY\",\"latencyMillis\":20,\"httpStatus\":200,\"message\":\"production ready\"}"))
+                .andExpect(status().isOk());
+        cicdDeploymentService.reconcileTriggered();
+
+        mockMvc.perform(get("/api/cicd/applications/{id}/deployments", productionId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].deploymentKind", is("PROMOTION")))
+                .andExpect(jsonPath("$.data[0].status", is("HEALTHY")))
+                .andExpect(jsonPath("$.data[0].imageUri", is(image)));
+
+        mockMvc.perform(post("/api/cicd/applications/{applicationId}/deployments/{deploymentId}/promote",
+                        fixture.applicationId(), sourceDeploymentId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"targetApplicationId\":\"%s\"}".formatted(productionId)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40954)));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/production", null, null, null, image);
+    }
+
+    @Test
     void unhealthyReleaseAutomaticallyRollsBackAndHealthyTargetSupportsManualRollback() throws Exception {
         Fixture fixture = createApplication();
         MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
@@ -518,6 +600,10 @@ class CicdIntegrationTests {
     }
 
     private Fixture createApplication() throws Exception {
+        return createApplication("PRODUCTION");
+    }
+
+    private Fixture createApplication(String environment) throws Exception {
         String accessToken = setupAdministrator();
         MvcResult createdServer = mockMvc.perform(post("/api/servers")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
@@ -541,12 +627,25 @@ class CicdIntegrationTests {
         MvcResult app = mockMvc.perform(post("/api/applications")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
                         .contentType(MediaType.APPLICATION_JSON).content("""
-                                {"name":"Demo","code":"demo","environment":"PRODUCTION",
+                                {"name":"Demo","code":"demo","environment":"%s",
                                  "serverId":"%s","containerSnapshotId":"%s",
                                  "healthCheckUrl":"http://127.0.0.1:8080/actuator/health"}
-                                """.formatted(serverId, containerId)))
+                                """.formatted(environment, serverId, containerId)))
                 .andExpect(status().isOk()).andReturn();
         return new Fixture(accessToken, data(app).path("id").asText(), agentToken);
+    }
+
+    private MvcResult configureWebhook(Fixture fixture, String applicationId, String webhook,
+                                       boolean autoDeploy) throws Exception {
+        return mockMvc.perform(put("/api/cicd/configurations/{id}", applicationId)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                                 "deploymentWebhookUrl":"%s","autoDeploy":%s,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """.formatted(webhook, autoDeploy)))
+                .andExpect(status().isOk()).andReturn();
     }
 
     private String callback(String status, String test, String security, String image) throws Exception {

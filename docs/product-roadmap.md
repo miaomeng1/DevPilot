@@ -45,7 +45,8 @@
 ### P2 · 更快交付
 
 - [x] 仓库接入向导与 GitHub Actions / GitLab CI / Woodpecker 可执行 Workflow 生成器
-- [ ] Preview / Staging 环境与临时访问地址
+- [x] STAGING → PRODUCTION 不可变镜像晋级、独立预检与访问地址
+- [ ] Pull Request Preview 临时环境与自动回收
 - [x] 环境变量模板、Revision 差异预览、全量加密与 Coolify 安全增量同步
 - [x] Compose 项目（Stack）自动分组、关联服务视图与可审计的顺序重启
 - [ ] 常用个人服务模板，但模板默认不暴露高风险端口

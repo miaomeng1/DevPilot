@@ -10,6 +10,8 @@ public record CicdActivityResponse(
         Long serverId,
         String serverName,
         String deploymentKind,
+        Long promotedFromApplicationId,
+        Long promotedFromDeploymentId,
         String provider,
         String imageUri,
         String status,

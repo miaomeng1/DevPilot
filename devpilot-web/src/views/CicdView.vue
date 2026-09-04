@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { applicationApi, type Application } from '@/api/applications'
-import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdReadiness, type PipelineRun } from '@/api/cicd'
+import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdPromotionTarget, type CicdReadiness, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
@@ -33,6 +33,9 @@ const environmentSaving = ref(false)
 const environmentSyncing = ref(false)
 const readiness = ref<CicdReadiness | null>(null)
 const readinessRefreshing = ref(false)
+const promotionTargets = ref<CicdPromotionTarget[]>([])
+const promotionTarget = ref<CicdPromotionTarget | null>(null)
+const promoting = ref(false)
 const runFilter = ref('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
@@ -70,6 +73,7 @@ const form = reactive<CicdConfigurationPayload>({
 
 const selectedApp = computed(() => applications.value.find((item) => item.id === selectedId.value) || null)
 const canConfigure = computed(() => auth.hasAnyRole(['ADMIN']))
+const canPromote = computed(() => auth.hasAnyRole(['ADMIN', 'DEVELOPER']))
 const summary = computed(() => ({
   total: runs.value.length,
   passed: runs.value.filter((run) => run.status === 'SUCCEEDED').length,
@@ -187,6 +191,7 @@ const statusLabels: Record<string, string> = {
   ROLLBACK_TRIGGERED: '回滚中 ROLLBACK',
   RELEASE: '发布 RELEASE',
   ROLLBACK: '回滚 ROLLBACK',
+  PROMOTION: '环境晋级 PROMOTION',
   PENDING: '等待中 PENDING',
   NOT_STARTED: '未开始 NOT STARTED',
   QUEUED: '排队中 QUEUED',
@@ -305,13 +310,14 @@ async function loadApplication(silent = false) {
   // explicitly switches/reloads the application.
   if (!silent) revealedSecret.value = ''
   try {
-    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult] = await Promise.all([
+    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult, targetResults] = await Promise.all([
       cicdApi.configuration(selectedId.value).catch(() => null),
       cicdApi.runs(selectedId.value),
       cicdApi.deployments(selectedId.value),
       applicationApi.get(selectedId.value),
       cicdApi.environment(selectedId.value),
       cicdApi.readiness(selectedId.value),
+      cicdApi.promotionTargets(selectedId.value),
     ])
     configuration.value = configurationResult
     if (!silent) {
@@ -322,6 +328,7 @@ async function loadApplication(silent = false) {
     deployments.value = deploymentHistory
     environment.value = environmentResult
     readiness.value = readinessResult
+    promotionTargets.value = targetResults
     if (!silent) {
       resetEnvironmentDraft(environmentResult)
       environmentOpen.value = environmentResult.variables.length > 0
@@ -392,6 +399,23 @@ async function rollback(deployment: CicdDeployment) {
   } finally { rollingBack.value = '' }
 }
 
+async function promote() {
+  const source = latestHealthyDeployment.value
+  const target = promotionTarget.value
+  if (!selectedId.value || !source || !target || promoting.value) return
+  promoting.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const deployment = await cicdApi.promote(selectedId.value, source.id, target.applicationId)
+    promotionTarget.value = null
+    successMessage.value = `${source.imageUri} 已开始晋级到 ${target.applicationName} · ${target.environment}（${deployment.provider}）`
+    await loadApplication(true)
+  } catch (error) {
+    errorMessage.value = apiErrorMessage(error, '无法晋级环境 Promote release')
+  } finally { promoting.value = false }
+}
+
 async function refreshReadiness() {
   if (!selectedId.value || readinessRefreshing.value) return
   readinessRefreshing.value = true
@@ -453,7 +477,10 @@ function tone(value: string) {
   return 'neutral'
 }
 
-watch(selectedId, () => void loadApplication())
+watch(selectedId, () => {
+  promotionTarget.value = null
+  void loadApplication()
+})
 onMounted(() => {
   void initialize()
   pollTimer = window.setInterval(() => void loadApplication(true), 15_000)
@@ -476,7 +503,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       <header><div><span>全局发布活动 · DEPLOYMENT ACTIVITY</span><strong>最近发布与回滚</strong><small>{{ activeDeployments ? `${activeDeployments} 个任务正在执行或验证` : '当前没有进行中的发布' }}</small></div><span class="activity-live"><i />LIVE</span></header>
       <div class="activity-list">
         <RouterLink v-for="item in activity.slice(0, 8)" :key="item.id" :to="{ path: '/cicd', query: { application: item.applicationId } }" @click="selectedId = item.applicationId">
-          <span class="activity-kind" :class="item.deploymentKind.toLowerCase()">{{ item.deploymentKind === 'ROLLBACK' ? '回滚' : '发布' }}</span>
+          <span class="activity-kind" :class="item.deploymentKind.toLowerCase()">{{ item.deploymentKind === 'ROLLBACK' ? '回滚' : item.deploymentKind === 'PROMOTION' ? '晋级' : '发布' }}</span>
           <div><strong>{{ item.applicationName }} <small>{{ item.environment }}</small></strong><code>{{ item.imageUri }}</code><p>{{ item.serverName }} · {{ item.provider }}<template v-if="item.logExcerpt"> · {{ item.logExcerpt }}</template></p></div>
           <aside><span class="pipeline-state" :class="tone(item.status)">{{ statusLabel(item.status) }}</span><time>{{ formatTime(item.updatedAt) }}</time></aside>
         </RouterLink>
@@ -510,6 +537,28 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             <button v-if="check.action" type="button" @click="handleReadinessAction(check.action)">{{ readinessActionLabel(check.action) }} →</button>
           </article>
         </div>
+      </section>
+
+      <section v-if="selectedApp.environment !== 'PRODUCTION'" class="promotion-panel">
+        <header>
+          <div><span>环境晋级 · ENVIRONMENT PROMOTION</span><strong>一次构建，逐级验证</strong><p>只把已验证健康的不可变镜像晋级到更高环境；目标变量、Provider 与健康检查保持独立。</p></div>
+          <span class="promotion-source">{{ selectedApp.environment }} <b>→</b> NEXT</span>
+        </header>
+        <div class="promotion-artifact" :class="{ missing: !latestHealthyDeployment }">
+          <span>{{ latestHealthyDeployment ? '可晋级凭证 Verified artifact' : '等待健康凭证' }}</span>
+          <strong>{{ latestHealthyDeployment?.imageUri || '当前环境还没有 HEALTHY 部署' }}</strong>
+          <a v-if="selectedApp.accessUrl" :href="selectedApp.accessUrl" target="_blank" rel="noreferrer">打开 {{ selectedApp.environment }} 环境 ↗</a>
+        </div>
+        <div v-if="promotionTargets.length" class="promotion-targets">
+          <article v-for="target in promotionTargets" :key="target.applicationId" :class="{ blocked: !target.ready }">
+            <div class="target-heading"><span>{{ target.environment }}</span><b :class="target.ready ? 'ready' : 'blocked'">{{ target.ready ? 'READY' : `${target.blockers.length} BLOCK` }}</b></div>
+            <strong>{{ target.applicationName }}</strong><small>{{ target.serverName }}</small>
+            <code>{{ target.currentHealthyImage || '尚无生产基线 No baseline' }}</code>
+            <ul v-if="target.blockers.length"><li v-for="blocker in target.blockers.slice(0, 3)" :key="blocker">{{ blocker }}</li></ul>
+            <div class="target-actions"><a v-if="target.accessUrl" :href="target.accessUrl" target="_blank" rel="noreferrer">访问环境 ↗</a><button v-if="canPromote" type="button" :disabled="!latestHealthyDeployment || !target.ready" @click="promotionTarget = target">选择晋级</button></div>
+          </article>
+        </div>
+        <div v-else class="promotion-empty"><strong>还没有更高环境</strong><p>创建一个绑定同仓库的 STAGING 或 PRODUCTION 应用后，就能在这里安全晋级。</p></div>
       </section>
 
       <section v-if="configuration && !configurationExpanded" class="connection-strip">
@@ -667,12 +716,21 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             <td>{{ deployment.provider }}<small v-if="deployment.providerDeploymentId">{{ deployment.providerDeploymentId }}</small></td>
             <td><span class="pipeline-state" :class="tone(deployment.status)">{{ statusLabel(deployment.status) }}</span><small v-if="deployment.status === 'TRIGGERED'">截止 Deadline {{ formatTime(deployment.healthDeadlineAt) }}</small></td>
             <td><details v-if="deployment.logs" class="deployment-log"><summary>查看采集日志 View logs</summary><pre>{{ deployment.logs }}</pre></details><span v-else>等待凭证 Awaiting evidence</span></td>
-            <td><button v-if="canConfigure && deployment.status === 'HEALTHY'" class="rollback-action" :disabled="!!rollingBack" @click="rollback(deployment)">{{ rollingBack === deployment.id ? '回滚中…' : '回滚到此版本' }}</button><span v-else>—</span></td>
+            <td><button v-if="canPromote && deployment.status === 'HEALTHY'" class="rollback-action" :disabled="!!rollingBack" @click="rollback(deployment)">{{ rollingBack === deployment.id ? '回滚中…' : '回滚到此版本' }}</button><span v-else>—</span></td>
           </tr>
           <tr v-if="!deployments.length"><td colspan="7" class="table-empty">尚未触发部署 No deployments.</td></tr>
         </tbody></table></div>
       </section>
     </template>
+
+    <div v-if="promotionTarget && latestHealthyDeployment" class="modal-backdrop" @click.self="promotionTarget = null">
+      <section class="server-dialog promotion-dialog" role="dialog" aria-modal="true" aria-labelledby="promotion-title">
+        <header><div><span>CONFIRM PROMOTION</span><h2 id="promotion-title">确认环境晋级？</h2></div><button aria-label="关闭" @click="promotionTarget = null">×</button></header>
+        <div class="promotion-route"><div><span>FROM</span><strong>{{ selectedApp?.environment }}</strong><small>{{ selectedApp?.name }}</small></div><b>→</b><div><span>TO</span><strong>{{ promotionTarget.environment }}</strong><small>{{ promotionTarget.applicationName }}</small></div></div>
+        <div class="promotion-dialog-body"><span>不可变镜像 Immutable artifact</span><code>{{ latestHealthyDeployment.imageUri }}</code><p>不会重新构建镜像。目标环境会先同步自己的运行变量，再通过 {{ promotionTarget.serverName }} 的独立健康检查；失败时按目标环境策略自动回滚。</p></div>
+        <footer><button type="button" @click="promotionTarget = null">取消</button><button class="confirm-promotion" type="button" :disabled="promoting" @click="promote">{{ promoting ? '正在晋级…' : `晋级到 ${promotionTarget.environment}` }}</button></footer>
+      </section>
+    </div>
   </section>
 </template>
 
@@ -694,6 +752,9 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 .readiness-panel>header{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:16px;padding:18px 20px}.readiness-score{display:flex;width:68px;height:58px;align-items:baseline;justify-content:center;border:1px solid rgba(59,130,246,.16);border-radius:12px;color:#2563eb;background:rgba(59,130,246,.055)}.readiness-score strong{align-self:center;font-size:24px;line-height:1}.readiness-score span{align-self:center;margin:9px 0 0 3px;color:#8391a5;font-size:8px}.readiness-title>span,.readiness-title>strong{display:block}.readiness-title>span{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.readiness-title>strong{margin-top:6px;font-size:15px}.readiness-title>p{margin:4px 0 0;color:var(--muted);font-size:10px}.readiness-panel.ready .readiness-score{border-color:rgba(34,197,94,.2);color:#16803d;background:rgba(34,197,94,.06)}.readiness-panel.blocked .readiness-score{border-color:rgba(239,68,68,.18);color:#c24141;background:rgba(239,68,68,.05)}
 .readiness-summary{display:flex;align-items:center;gap:6px}.readiness-summary b{border-radius:6px;padding:5px 7px;font-size:8px}.readiness-summary b.block{color:#c24141;background:rgba(239,68,68,.08)}.readiness-summary b.warn{color:#9a670c;background:rgba(245,158,11,.1)}.readiness-summary button{height:34px;border:1px solid var(--line);border-radius:8px;padding:0 10px;color:#41658f;background:transparent;font-size:9px;font-weight:750}.readiness-summary button:disabled{opacity:.45}.readiness-progress{height:3px;background:rgba(148,163,184,.1)}.readiness-progress i{display:block;height:100%;background:#60a5fa;transition:width .25s ease}.readiness-panel.ready .readiness-progress i{background:#4ade80}.readiness-panel.blocked .readiness-progress i{background:#f08a8a}
 .readiness-checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.readiness-checks article{display:grid;grid-template-columns:26px minmax(0,1fr);grid-template-rows:auto auto;column-gap:9px;min-height:88px;padding:13px 14px;background:var(--panel-solid)}.readiness-icon{display:grid;width:24px;height:24px;grid-row:1/3;place-items:center;border-radius:8px;color:#16803d;background:rgba(34,197,94,.08);font-size:11px;font-weight:900}.readiness-checks article.warn .readiness-icon{color:#a56509;background:rgba(245,158,11,.1)}.readiness-checks article.block .readiness-icon{color:#c24141;background:rgba(239,68,68,.08)}.readiness-checks article strong{font-size:10px}.readiness-checks article p{margin:4px 0 0;color:var(--muted);font-size:9px;line-height:1.45}.readiness-checks article>button{grid-column:2;margin-top:8px;justify-self:start;border:0;padding:0;color:#3975c6;background:transparent;font-size:8px;font-weight:750}
+.promotion-panel{overflow:hidden;margin-top:16px;border:1px solid rgba(99,102,241,.18);border-radius:16px;background:linear-gradient(135deg,rgba(238,242,255,.055),var(--panel) 42%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.promotion-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:19px 21px;border-bottom:1px solid var(--line)}.promotion-panel>header div>span,.promotion-panel>header div>strong{display:block}.promotion-panel>header div>span{color:#7c85df;font-size:9px;font-weight:850;letter-spacing:.13em}.promotion-panel>header div>strong{margin-top:6px;font-size:15px}.promotion-panel>header p{margin:5px 0 0;color:var(--muted);font-size:10px}.promotion-source{display:flex;align-items:center;gap:8px;border:1px solid rgba(99,102,241,.18);border-radius:18px;padding:6px 10px;color:#6c72c9;background:rgba(99,102,241,.06);font-size:9px;font-weight:850}.promotion-source b{color:#9aa2b3}
+.promotion-artifact{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--line);background:rgba(34,197,94,.035)}.promotion-artifact.missing{background:rgba(245,158,11,.035)}.promotion-artifact span{color:#607089;font-size:9px;font-weight:750}.promotion-artifact strong{overflow:hidden;color:#5b4db0;font:10px ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.promotion-artifact a{color:#3975c6;font-size:9px;text-decoration:none}.promotion-targets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.promotion-targets article{display:grid;min-width:0;padding:15px 16px;background:var(--panel-solid)}.promotion-targets article.blocked{background:rgba(245,158,11,.025)}.target-heading{display:flex;align-items:center;justify-content:space-between}.target-heading>span{color:#6d72c7;font-size:9px;font-weight:850;letter-spacing:.08em}.target-heading>b{border-radius:5px;padding:4px 6px;color:#16803d;background:rgba(34,197,94,.08);font-size:7px}.target-heading>b.blocked{color:#a56509;background:rgba(245,158,11,.1)}.promotion-targets article>strong{margin-top:10px;font-size:13px}.promotion-targets article>small{margin-top:4px;color:var(--muted);font-size:9px}.promotion-targets article>code{overflow:hidden;margin-top:10px;color:#7567ba;font:8px ui-monospace,monospace;text-overflow:ellipsis;white-space:nowrap}.promotion-targets ul{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.promotion-targets li{color:#9a670c;font-size:8px;line-height:1.4}.promotion-targets li::before{content:'×';margin-right:5px;color:#d97706}.target-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:13px}.target-actions a{color:#3975c6;font-size:8px;text-decoration:none}.target-actions button{height:30px;border:0;border-radius:7px;padding:0 10px;color:#fff;background:#6366f1;font-size:8px;font-weight:800}.target-actions button:disabled{cursor:not-allowed;color:#8a95a6;background:rgba(148,163,184,.1)}.promotion-empty{padding:24px;text-align:center}.promotion-empty strong{font-size:11px}.promotion-empty p{margin:6px 0 0;color:var(--muted);font-size:9px}
+.activity-kind.promotion{border-color:rgba(99,102,241,.2);color:#818cf8;background:rgba(99,102,241,.07)}.promotion-dialog{width:min(620px,100%)}.promotion-route{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:21px 23px;border-bottom:1px solid var(--line)}.promotion-route>div{display:grid;gap:4px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel)}.promotion-route>div>span{color:#7c85df;font-size:8px;font-weight:850}.promotion-route>div>strong{font-size:14px}.promotion-route>div>small{color:var(--muted);font-size:9px}.promotion-route>b{color:#818cf8;font-size:18px}.promotion-dialog-body{display:grid;gap:8px;padding:20px 23px}.promotion-dialog-body>span{color:#68778c;font-size:9px;font-weight:750}.promotion-dialog-body>code{overflow:auto;border:1px solid var(--line);border-radius:8px;padding:11px;color:#7567ba;background:var(--panel);font:10px ui-monospace,monospace}.promotion-dialog-body>p{margin:4px 0 0;color:var(--muted);font-size:10px;line-height:1.6}.promotion-dialog>footer .confirm-promotion{border-color:transparent;color:#fff;background:#6366f1;font-weight:800}.promotion-dialog>footer .confirm-promotion:disabled{opacity:.45}
 .cicd-environment-panel{overflow:hidden;margin-top:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 10px 32px rgba(38,57,84,.04)}
 .cicd-environment-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 22px}
 .cicd-environment-panel.expanded>header{border-bottom:1px solid var(--line)}
@@ -706,8 +767,10 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 @media(max-width:1100px){.onboarding-grid{grid-template-columns:1fr}.onboarding-config{border-right:0;border-bottom:1px solid var(--line)}.onboarding-steps li:not(:last-child)::after{display:none}}
 @media(max-width:1100px){.environment-body{grid-template-columns:1fr}.environment-templates{grid-template-columns:1fr 1fr 1fr}.environment-templates>div{grid-column:1/-1}.environment-row{grid-template-columns:1fr 1fr}.environment-description{grid-column:1/-1}.secret-toggle,.remove-variable{justify-self:start}}
 @media(max-width:1100px){.readiness-checks{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1100px){.promotion-targets{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header,.cicd-environment-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body,.environment-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}.environment-header-actions{width:100%;justify-content:space-between}.environment-templates{grid-template-columns:1fr 1fr}.environment-row{grid-template-columns:1fr}.environment-description{grid-column:auto}.secret-toggle,.remove-variable{justify-self:stretch}.remove-variable{width:100%}}
 @media(max-width:700px){.readiness-panel>header{grid-template-columns:auto 1fr}.readiness-summary{grid-column:1/-1}.readiness-checks{grid-template-columns:1fr}}
+@media(max-width:700px){.promotion-panel>header{align-items:flex-start;flex-direction:column}.promotion-artifact{grid-template-columns:1fr}.promotion-targets{grid-template-columns:1fr}.promotion-route{grid-template-columns:1fr}.promotion-route>b{justify-self:center;transform:rotate(90deg)}}
 :global(:root[data-theme='light']) .cicd-panel,:global(:root[data-theme='light']) .callback-panel,:global(:root[data-theme='light']) .pipeline-panel,:global(:root[data-theme='light']) .connection-strip{box-shadow:0 8px 28px rgba(38,57,84,.045)}
 :global(:root[data-theme='light']) .delivery-overview>header p{color:#5f7088}
 :global(:root[data-theme='light']) .delivery-actions a,:global(:root[data-theme='light']) .connection-strip>button{color:#41658f;background:#fff}

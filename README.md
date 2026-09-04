@@ -28,6 +28,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **不可变镜像**：使用 `sha-<commit>` 标签，支持 GHCR / GitLab Container Registry 和 amd64 / arm64
 - **受控部署**：只有测试和安全门禁通过后，才调用 Coolify / Dokploy 部署精确镜像；同一应用的发布持久排队、严格串行
 - **发布前检查**：在一个面板汇总 Provider、Agent、健康端点、磁盘、变量与并发状态；阻断条件恢复后排队版本自动继续
+- **环境晋级**：将 STAGING 已验证健康的同一不可变镜像晋级到 PRODUCTION，不重复构建，并保留来源证据与目标独立回滚
 - **安全运行配置**：环境变量模板、增删改差异、Revision 防覆盖、Secret 永不回显，以及 Coolify 发布前增量同步
 - **健康检查与回滚**：部署完成后等待新的 Agent 探测；失败时保留旧版本并自动回滚
 - **应用工作台**：关联镜像、容器、服务器、容器 IP、宿主机端口、Access URL 和 Health URL

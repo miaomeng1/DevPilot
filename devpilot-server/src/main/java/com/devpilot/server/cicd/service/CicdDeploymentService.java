@@ -6,6 +6,7 @@ import com.devpilot.server.application.mapper.ApplicationDeploymentMapper;
 import com.devpilot.server.application.mapper.ApplicationMapper;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.CicdActivityResponse;
+import com.devpilot.server.cicd.dto.CicdPromotionTargetResponse;
 import com.devpilot.server.cicd.entity.CicdConfigurationEntity;
 import com.devpilot.server.cicd.entity.CicdDeploymentEntity;
 import com.devpilot.server.cicd.entity.CicdPipelineRunEntity;
@@ -22,6 +23,7 @@ import com.devpilot.server.node.dto.ServerNodeResponse;
 import com.devpilot.server.node.service.ServerNodeService;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -85,6 +87,16 @@ public class CicdDeploymentService {
                 .map(CicdDeploymentService::toResponse).toList();
     }
 
+    public List<CicdPromotionTargetResponse> promotionTargets(Long sourceApplicationId) {
+        ApplicationEntity source = requireApplication(sourceApplicationId);
+        CicdConfigurationEntity sourceConfiguration = configurationMapper.selectByApplicationId(sourceApplicationId);
+        CicdDeploymentEntity sourceHealthy = deploymentMapper.selectLatestHealthy(sourceApplicationId);
+        return applicationMapper.selectAll().stream()
+                .filter(candidate -> !candidate.getId().equals(sourceApplicationId))
+                .filter(candidate -> environmentRank(candidate.getEnvironment()) > environmentRank(source.getEnvironment()))
+                .map(candidate -> promotionTarget(sourceConfiguration, sourceHealthy, candidate)).toList();
+    }
+
     public List<CicdActivityResponse> activity(int requestedLimit) {
         int limit = Math.max(1, Math.min(requestedLimit, 100));
         return deploymentMapper.selectRecentAll(limit).stream().map(this::toActivityResponse).toList();
@@ -112,6 +124,55 @@ public class CicdDeploymentService {
                 current == null ? null : current.getImageUri(), principal.userId());
         triggerProvider(configuration, rollback, null);
         return toResponse(rollback);
+    }
+
+    @Transactional
+    public CicdDeploymentResponse promote(Long sourceApplicationId, Long sourceDeploymentId,
+                                          Long targetApplicationId, DevPilotPrincipal principal) {
+        ApplicationEntity source = requireApplication(sourceApplicationId);
+        if (sourceApplicationId.equals(targetApplicationId)) {
+            throw BusinessException.badRequest(40052, "不能将版本晋级到同一个应用");
+        }
+        ApplicationEntity target = lockApplication(targetApplicationId);
+        if (environmentRank(target.getEnvironment()) <= environmentRank(source.getEnvironment())) {
+            throw BusinessException.badRequest(40052, "只能从较低环境晋级到 STAGING 或 PRODUCTION 等更高环境");
+        }
+        CicdDeploymentEntity sourceDeployment = deploymentMapper.selectById(sourceDeploymentId);
+        if (sourceDeployment == null || !sourceApplicationId.equals(sourceDeployment.getApplicationId())
+                || !"HEALTHY".equals(sourceDeployment.getStatus())) {
+            throw BusinessException.badRequest(40053, "只能晋级来源应用已经验证 HEALTHY 的部署");
+        }
+        if (!immutableImage(sourceDeployment.getImageUri())) {
+            throw BusinessException.badRequest(40054, "晋级必须使用不可变 digest 或 sha-* 镜像");
+        }
+        CicdConfigurationEntity sourceConfiguration = requireConfiguration(sourceApplicationId);
+        CicdConfigurationEntity targetConfiguration = requireConfiguration(targetApplicationId);
+        if (!sourceConfiguration.getRepositoryUrl().equals(targetConfiguration.getRepositoryUrl())) {
+            throw BusinessException.badRequest(40055, "来源与目标应用必须配置同一个代码仓库");
+        }
+        CicdDeploymentEntity active = deploymentMapper.selectActive(targetApplicationId);
+        if (active != null) {
+            throw BusinessException.conflict(40951, "目标环境已有发布正在执行，请完成后再晋级");
+        }
+        String storageBlock = storageBlock(target);
+        if (storageBlock != null) throw BusinessException.conflict(40952, storageBlock);
+        String readinessBlock = readinessService.promotionBlockingReason(targetApplicationId);
+        if (readinessBlock != null) throw BusinessException.conflict(40953, readinessBlock);
+
+        CicdDeploymentEntity previous = deploymentMapper.selectLatestHealthy(targetApplicationId);
+        if (previous != null && sourceDeployment.getImageUri().equals(previous.getImageUri())) {
+            throw BusinessException.conflict(40954, "目标环境已经运行该健康镜像，无需重复晋级");
+        }
+        CicdDeploymentEntity promotion = create(targetConfiguration, null, null, "PROMOTION",
+                sourceDeployment.getImageUri(), previous == null ? null : previous.getImageUri(), principal.userId());
+        promotion.setPromotedFromApplicationId(sourceApplicationId);
+        promotion.setPromotedFromDeploymentId(sourceDeploymentId);
+        promotion.setLogs("Promoted immutable image from " + source.getName() + " (" + source.getEnvironment()
+                + ") to " + target.getName() + " (" + target.getEnvironment() + ")");
+        promotion.setUpdatedAt(now());
+        deploymentMapper.updateById(promotion);
+        triggerProvider(targetConfiguration, promotion, null);
+        return toResponse(promotion);
     }
 
     @Scheduled(fixedDelayString = "${devpilot.cicd.health-reconcile-interval:10s}",
@@ -380,7 +441,8 @@ public class CicdDeploymentService {
 
     private static CicdDeploymentResponse toResponse(CicdDeploymentEntity entity) {
         return new CicdDeploymentResponse(entity.getId(), entity.getApplicationId(), entity.getPipelineRunId(),
-                entity.getRollbackOfId(), entity.getDeploymentKind(), entity.getProvider(), entity.getImageUri(),
+                entity.getRollbackOfId(), entity.getPromotedFromApplicationId(), entity.getPromotedFromDeploymentId(),
+                entity.getDeploymentKind(), entity.getProvider(), entity.getImageUri(),
                 entity.getPreviousImageUri(), entity.getStatus(), entity.getProviderDeploymentId(), entity.getLogs(),
                 entity.getTriggeredBy(), entity.getStartedAt(), entity.getHealthDeadlineAt(), entity.getCompletedAt(),
                 entity.getUpdatedAt());
@@ -390,15 +452,61 @@ public class CicdDeploymentService {
         ApplicationEntity application = applicationMapper.selectById(entity.getApplicationId());
         if (application == null) {
             return new CicdActivityResponse(entity.getId(), entity.getApplicationId(), "已删除应用", "UNKNOWN",
-                    null, "未知服务器", entity.getDeploymentKind(), entity.getProvider(), entity.getImageUri(),
+                    null, "未知服务器", entity.getDeploymentKind(), entity.getPromotedFromApplicationId(),
+                    entity.getPromotedFromDeploymentId(), entity.getProvider(), entity.getImageUri(),
                     entity.getStatus(), excerpt(entity.getLogs()), entity.getStartedAt(), entity.getCompletedAt(),
                     entity.getUpdatedAt());
         }
         ServerNodeResponse server = serverNodeService.get(application.getServerId());
         return new CicdActivityResponse(entity.getId(), entity.getApplicationId(), application.getName(),
                 application.getEnvironment(), application.getServerId(), server.name(), entity.getDeploymentKind(),
-                entity.getProvider(), entity.getImageUri(), entity.getStatus(), excerpt(entity.getLogs()),
+                entity.getPromotedFromApplicationId(), entity.getPromotedFromDeploymentId(), entity.getProvider(),
+                entity.getImageUri(), entity.getStatus(), excerpt(entity.getLogs()),
                 entity.getStartedAt(), entity.getCompletedAt(), entity.getUpdatedAt());
+    }
+
+    private CicdPromotionTargetResponse promotionTarget(CicdConfigurationEntity sourceConfiguration,
+                                                         CicdDeploymentEntity sourceHealthy,
+                                                         ApplicationEntity candidate) {
+        List<String> blockers = new ArrayList<>(readinessService.promotionBlockers(candidate.getId()).stream()
+                .map(check -> check.title() + "：" + check.detail()).toList());
+        CicdConfigurationEntity targetConfiguration = configurationMapper.selectByApplicationId(candidate.getId());
+        if (sourceHealthy == null) blockers.addFirst("来源环境还没有 HEALTHY 部署");
+        if (sourceConfiguration == null) blockers.addFirst("来源应用尚未配置 CI/CD");
+        else if (targetConfiguration == null) blockers.addFirst("目标应用尚未配置 CI/CD");
+        else if (!sourceConfiguration.getRepositoryUrl().equals(targetConfiguration.getRepositoryUrl())) {
+            blockers.addFirst("目标应用绑定了不同的代码仓库");
+        }
+        CicdDeploymentEntity current = deploymentMapper.selectLatestHealthy(candidate.getId());
+        if (sourceHealthy != null && current != null && sourceHealthy.getImageUri().equals(current.getImageUri())) {
+            blockers.addFirst("目标环境已经运行该健康镜像");
+        }
+        return new CicdPromotionTargetResponse(candidate.getId(), candidate.getName(), candidate.getEnvironment(),
+                candidate.getServerId(), serverName(candidate.getServerId()), candidate.getAccessUrl(), blockers.isEmpty(),
+                blockers, current == null ? null : current.getImageUri());
+    }
+
+    private String serverName(Long serverId) {
+        try {
+            return serverNodeService.get(serverId).name();
+        } catch (BusinessException exception) {
+            return "不可用服务器";
+        }
+    }
+
+    private static int environmentRank(String environment) {
+        return switch (environment) {
+            case "DEV" -> 0;
+            case "TEST" -> 1;
+            case "STAGING" -> 2;
+            case "PRODUCTION" -> 3;
+            default -> -1;
+        };
+    }
+
+    private static boolean immutableImage(String image) {
+        return image != null && (image.matches(".+@sha256:[0-9a-fA-F]{64}$")
+                || image.matches(".+:sha-[0-9a-fA-F]{7,64}$"));
     }
 
     private static String versionOf(String imageUri) {

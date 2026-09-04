@@ -14,6 +14,8 @@ public class CicdDeploymentEntity {
     private Long applicationId;
     private Long pipelineRunId;
     private Long rollbackOfId;
+    private Long promotedFromApplicationId;
+    private Long promotedFromDeploymentId;
     private String deploymentKind;
     private String provider;
     private String imageUri;
@@ -27,4 +29,3 @@ public class CicdDeploymentEntity {
     private LocalDateTime completedAt;
     private LocalDateTime updatedAt;
 }
-
