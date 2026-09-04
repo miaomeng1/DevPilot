@@ -35,6 +35,7 @@ class MaintenanceIntegrationTests {
 
     @BeforeEach
     void resetDatabase() {
+        TestDatabaseReset.reset(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM maintenance_restore_drill");
         jdbcTemplate.update("DELETE FROM maintenance_backup_report");
         jdbcTemplate.update("DELETE FROM audit_log");

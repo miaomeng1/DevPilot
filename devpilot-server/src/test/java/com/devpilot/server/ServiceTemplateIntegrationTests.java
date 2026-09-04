@@ -35,6 +35,7 @@ class ServiceTemplateIntegrationTests {
 
     @BeforeEach
     void resetDatabase() {
+        TestDatabaseReset.reset(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM service_installation");
         jdbcTemplate.update("DELETE FROM application_deployment");

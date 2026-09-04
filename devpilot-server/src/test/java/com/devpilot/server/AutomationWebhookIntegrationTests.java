@@ -46,6 +46,7 @@ class AutomationWebhookIntegrationTests {
 
     @BeforeEach
     void reset() {
+        TestDatabaseReset.reset(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM automation_webhook_delivery");
         jdbcTemplate.update("DELETE FROM automation_webhook_subscription");

@@ -51,6 +51,7 @@ class CicdIntegrationTests {
 
     @BeforeEach
     void resetDatabase() {
+        TestDatabaseReset.reset(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM application_environment_variable");
         jdbcTemplate.update("DELETE FROM application_environment_state");

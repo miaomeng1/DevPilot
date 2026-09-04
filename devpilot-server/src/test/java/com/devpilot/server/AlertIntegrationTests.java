@@ -53,6 +53,7 @@ class AlertIntegrationTests {
 
     @BeforeEach
     void resetDatabase() {
+        TestDatabaseReset.reset(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM audit_log");
         jdbcTemplate.update("DELETE FROM alert_notification");
         jdbcTemplate.update("DELETE FROM alert_maintenance_window");
