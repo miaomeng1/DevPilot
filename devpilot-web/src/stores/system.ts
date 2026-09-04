@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { settingsApi, type PublicSettings } from '@/api/settings'
 
 export const useSystemStore = defineStore('system', () => {
-  const settings = ref<PublicSettings>({ systemName: 'DevPilot', logoUrl: null, defaultTheme: 'DARK', logDefaultLines: 100 })
+  const settings = ref<PublicSettings>({ systemName: 'DevPilot', logoUrl: null, defaultTheme: 'LIGHT', logDefaultLines: 100 })
   const loaded = ref(false)
   let pending: Promise<PublicSettings> | null = null
 

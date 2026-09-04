@@ -21,6 +21,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class AlertRuleService {
 
     private static final Set<String> PERCENTAGE_METRICS = Set.of("SERVER_CPU", "SERVER_MEMORY", "SERVER_DISK");
+    private static final Set<String> THRESHOLD_METRICS = Set.of(
+            "SERVER_CPU", "SERVER_MEMORY", "SERVER_DISK", "CONTAINER_RESTARTS");
     private final AlertRuleMapper ruleMapper;
     private final ServerNodeMapper serverMapper;
     private final AlertEvaluationService evaluationService;
@@ -80,14 +82,18 @@ public class AlertRuleService {
                     || request.threshold() < 0 || request.threshold() > 100) {
                 throw BusinessException.badRequest(40033, "资源使用率阈值必须在 0 到 100 之间");
             }
+        } else if ("CONTAINER_RESTARTS".equals(request.metricType())
+                && (request.threshold() == null || !Double.isFinite(request.threshold())
+                || request.threshold() < 1 || request.threshold() > 10000)) {
+            throw BusinessException.badRequest(40033, "容器重启次数阈值必须在 1 到 10000 之间");
         }
     }
 
     private static void apply(AlertRuleEntity entity, AlertRuleRequest request) {
-        boolean percentage = PERCENTAGE_METRICS.contains(request.metricType());
+        boolean threshold = THRESHOLD_METRICS.contains(request.metricType());
         entity.setName(request.name().trim());
         entity.setMetricType(request.metricType());
-        entity.setOperator(percentage ? request.operator() : "EQ");
+        entity.setOperator(threshold ? request.operator() : "EQ");
         entity.setThreshold(normalizedThreshold(request));
         entity.setDurationSeconds(request.durationSeconds());
         entity.setSeverity(request.severity());
@@ -96,7 +102,7 @@ public class AlertRuleService {
     }
 
     private static Double normalizedThreshold(AlertRuleRequest request) {
-        return PERCENTAGE_METRICS.contains(request.metricType()) ? request.threshold() : 1.0;
+        return THRESHOLD_METRICS.contains(request.metricType()) ? request.threshold() : 1.0;
     }
 
     private AlertRuleEntity require(Long id) {

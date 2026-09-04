@@ -15,5 +15,11 @@ public interface CicdPipelineRunMapper extends BaseMapper<CicdPipelineRunEntity>
 
     @Select("SELECT * FROM cicd_pipeline_run WHERE application_id = #{applicationId} ORDER BY started_at DESC LIMIT #{limit}")
     List<CicdPipelineRunEntity> selectRecent(@Param("applicationId") Long applicationId, @Param("limit") int limit);
-}
 
+    @Select("SELECT DISTINCT application_id FROM cicd_pipeline_run WHERE deploy_status = 'QUEUED' ORDER BY application_id")
+    List<Long> selectQueuedApplicationIds();
+
+    @Select("SELECT * FROM cicd_pipeline_run WHERE application_id = #{applicationId} "
+            + "AND deploy_status = 'QUEUED' ORDER BY started_at ASC, id ASC LIMIT 1")
+    CicdPipelineRunEntity selectOldestQueued(@Param("applicationId") Long applicationId);
+}

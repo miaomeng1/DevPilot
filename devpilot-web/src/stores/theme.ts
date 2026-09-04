@@ -4,7 +4,8 @@ import { ref } from 'vue'
 export type ThemeMode = 'dark' | 'light'
 
 export const useThemeStore = defineStore('theme', () => {
-  const mode = ref<ThemeMode>((localStorage.getItem('devpilot-theme') as ThemeMode) || 'dark')
+  const savedMode = localStorage.getItem('devpilot-theme')
+  const mode = ref<ThemeMode>(savedMode === 'dark' || savedMode === 'light' ? savedMode : 'light')
 
   function apply() {
     document.documentElement.dataset.theme = mode.value

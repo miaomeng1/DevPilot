@@ -26,15 +26,18 @@ DevPilot  ─────────→  Coolify / Dokploy
 
 - **CI/CD 发布中心**：接入 GitHub、GitLab、Woodpecker，查看 Commit、测试、安全扫描、镜像和生产部署状态
 - **不可变镜像**：使用 `sha-<commit>` 标签，支持 GHCR / GitLab Container Registry 和 amd64 / arm64
-- **受控部署**：只有测试和安全门禁通过后，才调用 Coolify / Dokploy 部署精确镜像
+- **受控部署**：只有测试和安全门禁通过后，才调用 Coolify / Dokploy 部署精确镜像；同一应用的发布持久排队、严格串行
 - **健康检查与回滚**：部署完成后等待新的 Agent 探测；失败时保留旧版本并自动回滚
 - **应用工作台**：关联镜像、容器、服务器、容器 IP、宿主机端口、Access URL 和 Health URL
+- **自动发现与行动中心**：识别尚未纳管的容器并预填应用信息，首页直接提示当前异常和下一步操作
 - **服务器监控**：CPU、负载、内存、磁盘、网络及 1h / 6h / 24h / 7d 趋势
+- **磁盘水位保护**：80% 预警、90% 高危；95% 或低于 2 GiB 时暂停新发布，空间恢复后自动继续
 - **Docker 管理**：容器发现、资源统计、启动、停止、重启、删除以及实时 WebSocket 日志
 - **Nginx 安全变更**：暂存编辑 → `nginx -t` → 备份 → 替换 → Reload，支持历史记录与回滚
-- **告警中心**：FIRING / ACKNOWLEDGED / RESOLVED 生命周期，支持飞书、企业微信和 Discord Webhook
+- **告警中心**：磁盘、持续离线、健康失败与 10 分钟容器重启风暴检测，支持飞书、企业微信和 Discord Webhook
 - **权限与审计**：ADMIN / DEVELOPER / VIEWER RBAC，关键操作审计与敏感字段结构化脱敏
 - **自托管交付**：Docker Compose、MySQL 8、Redis、Linux Agent、systemd 安装及备份恢复脚本
+- **备份维护中心**：主机脚本完成数据库归档与 SHA-256 自检后，签名上报凭证，并记录隔离恢复演练结果
 
 ## 一台服务器也可以使用
 
@@ -107,7 +110,7 @@ Web 镜像在 `/downloads/` 提供带校验和的 amd64 / arm64 Agent 二进制�
 
 1. 为业务项目准备 `Dockerfile` 和 `/healthz` 健康检查接口。
 2. 在 Dokploy 或 Coolify 创建 Application，配置域名、容器端口和环境变量。
-3. 在 DevPilot 的 **应用 Applications** 中登记服务并绑定容器。
+3. 在 DevPilot 的 **应用 Applications** 中从“自动发现”选择容器，确认预填信息后完成纳管。
 4. DevPilot 会展示镜像、容器 IP 和真实端口映射，并可生成访问与健康检查地址。
 5. 在 **发布 CI/CD** 中配置仓库、受保护分支、部署平台 API 和资源 ID。
 6. 把一次性回调 Secret 与回调 URL 存入 CI 平台的受保护 Secrets。
@@ -182,3 +185,4 @@ cd devpilot-agent && go test ./...
 - [部署指南](docs/deployment.md)
 - [CI/CD 指南](docs/cicd.md)
 - [API Map](docs/api.md)
+- [产品路线图与竞品取舍](docs/product-roadmap.md)

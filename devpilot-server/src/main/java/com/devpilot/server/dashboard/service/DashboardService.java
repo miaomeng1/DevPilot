@@ -9,6 +9,8 @@ import com.devpilot.server.metric.service.MetricService;
 import com.devpilot.server.docker.mapper.DockerContainerSnapshotMapper;
 import com.devpilot.server.node.mapper.ServerNodeMapper;
 import com.devpilot.server.monitor.service.MonitorService;
+import com.devpilot.server.monitor.dto.MonitorServerResponse;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -25,13 +27,18 @@ public class DashboardService {
 
     public DashboardResponse get(String rangeValue) {
         MetricRange range = MetricRange.parse(rangeValue);
+        List<MonitorServerResponse> servers = monitorService.servers();
+        long storageCritical = servers.stream().filter(server -> server.current() != null
+                && server.current().diskUsage() >= 90.0).count();
+        long storageWarnings = servers.stream().filter(server -> server.current() != null
+                && server.current().diskUsage() >= 80.0 && server.current().diskUsage() < 90.0).count();
         DashboardSummaryResponse summary = new DashboardSummaryResponse(
                 serverNodeMapper.countAllActive(), serverNodeMapper.countOnline(),
                 dockerContainerMapper.countAllActive(), dockerContainerMapper.countRunning(),
                 applicationService.count(), applicationService.countUnhealthy(), alertEventService.summary().active(),
-                applicationService.countDeploymentsToday());
+                applicationService.countDeploymentsToday(), storageWarnings, storageCritical);
         return new DashboardResponse(summary, range.value(), metricService.globalTrend(range),
-                monitorService.servers().stream().limit(6).toList(),
+                servers.stream().limit(6).toList(),
                 applicationService.serviceStatuses(), applicationService.recentDeployments(), alertEventService.current(6));
     }
 }

@@ -108,6 +108,17 @@ public class AlertEvaluationService {
                                 !"running".equalsIgnoreCase(container.getState())));
                     }
                 }
+                case "CONTAINER_RESTARTS" -> {
+                    for (DockerContainerSnapshotEntity container : containerMapper.selectActive(server.getId())) {
+                        boolean freshWindow = container.getRestartWindowStartedAt() != null
+                                && !container.getRestartWindowStartedAt().isBefore(now.minusMinutes(10));
+                        double restarts = freshWindow && container.getRestartWindowCount() != null
+                                ? container.getRestartWindowCount() : 0.0;
+                        result.add(new Observation(server.getId(), "CONTAINER", container.getId().toString(),
+                                container.getName(), restarts,
+                                compare(restarts, rule.getOperator(), rule.getThreshold())));
+                    }
+                }
                 case "APP_UNHEALTHY" -> {
                     for (ApplicationEntity application : applicationMapper.selectByServer(server.getId())) {
                         boolean unhealthy = "UNHEALTHY".equals(application.getHealthStatus());
@@ -231,6 +242,9 @@ public class AlertEvaluationService {
         return switch (rule.getMetricType()) {
             case "AGENT_OFFLINE" -> rule.getName() + ": Agent is offline on " + observation.resourceName();
             case "CONTAINER_STOPPED" -> rule.getName() + ": Container " + observation.resourceName() + " is stopped";
+            case "CONTAINER_RESTARTS" -> "%s: Container %s restarted %.0f times within 10 minutes (%s %.0f)"
+                    .formatted(rule.getName(), observation.resourceName(), observation.value(),
+                            symbol(rule.getOperator()), rule.getThreshold());
             case "APP_UNHEALTHY" -> rule.getName() + ": Application " + observation.resourceName() + " is unhealthy";
             default -> rule.getName() + ": condition met for " + observation.resourceName();
         };

@@ -162,6 +162,45 @@ class AlertIntegrationTests {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.summary.currentAlerts", is(0)));
     }
 
+    @Test
+    void containerRestartStormUsesRollingDeltaAndResolvesAfterWindow() throws Exception {
+        String accessToken = setupAdministrator();
+        MvcResult serverResult = mockMvc.perform(post("/api/servers")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"restart-node\"}"))
+                .andExpect(status().isOk()).andReturn();
+        String serverId = data(serverResult).path("server").path("id").asText();
+        String agentToken = data(serverResult).path("agentToken").asText();
+        register(agentToken);
+        uploadDocker(agentToken, 0);
+        uploadDocker(agentToken, 4);
+
+        mockMvc.perform(post("/api/alerts/rules")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "name", "Container restart storm", "metricType", "CONTAINER_RESTARTS",
+                                "operator", "GTE", "threshold", 3, "durationSeconds", 0,
+                                "severity", "CRITICAL", "serverId", serverId, "enabled", true))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.threshold", is(3.0)));
+
+        evaluationService.evaluateAll();
+        mockMvc.perform(get("/api/alerts").header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data", hasSize(1)))
+                .andExpect(jsonPath("$.data[0].resourceName", is("demo")))
+                .andExpect(jsonPath("$.data[0].message", containsString("restarted 4 times within 10 minutes")));
+
+        jdbcTemplate.update("UPDATE docker_container_snapshot SET restart_window_started_at = ?",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(11));
+        evaluationService.evaluateAll();
+        mockMvc.perform(get("/api/alerts").param("status", "RESOLVED")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data", hasSize(1)));
+    }
+
     private void register(String token) throws Exception {
         mockMvc.perform(post("/api/agent/register").contentType(MediaType.APPLICATION_JSON).content("""
                 {"token":"%s","hostname":"prod-host","ip":"10.0.0.50","os":"Linux",
@@ -181,6 +220,21 @@ class AlertIntegrationTests {
                 """.formatted(Instant.now(), cpu);
         mockMvc.perform(post("/api/agent/metrics").header("X-DevPilot-Agent-Token", token)
                         .contentType(MediaType.APPLICATION_JSON).content(payload)).andExpect(status().isOk());
+    }
+
+    private void uploadDocker(String token, int restartCount) throws Exception {
+        String payload = """
+                {"agentVersion":"0.1.0","available":true,"engineVersion":"28.3.3","images":1,
+                 "volumes":0,"networks":1,"collectedAt":"%s","containers":[
+                  {"containerId":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                   "name":"demo","image":"ghcr.io/acme/demo:sha-test","state":"running","status":"Up",
+                   "health":"healthy","cpuUsage":1,"memoryUsage":1,"memoryLimit":2,
+                   "networkRx":1,"networkTx":1,"ports":[],"createdAt":"2026-08-30T00:00:00Z",
+                   "startedAt":"2026-08-31T00:00:00Z","restartCount":%d,"volumes":[],"environment":[]}]}
+                """.formatted(Instant.now(), restartCount);
+        mockMvc.perform(post("/api/agent/docker/snapshot").header("X-DevPilot-Agent-Token", token)
+                        .contentType(MediaType.APPLICATION_JSON).content(payload))
+                .andExpect(status().isOk());
     }
 
     private String setupAdministrator() throws Exception {

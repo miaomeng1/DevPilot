@@ -16,6 +16,7 @@ const errorMessage = ref('')
 const webhook = ref({ enabled: false, configured: false, destinationType: 'NONE' })
 const webhookUrl = ref('')
 const webhookSaving = ref(false)
+const presetSaving = ref(false)
 
 const metricOptions: { value: AlertMetricType; label: string; detail: string }[] = [
   { value: 'SERVER_CPU', label: 'Server CPU', detail: 'CPU utilization percentage' },
@@ -23,6 +24,7 @@ const metricOptions: { value: AlertMetricType; label: string; detail: string }[]
   { value: 'SERVER_DISK', label: 'Server disk', detail: 'Root disk utilization percentage' },
   { value: 'AGENT_OFFLINE', label: 'Agent offline', detail: 'Heartbeat timeout state' },
   { value: 'CONTAINER_STOPPED', label: 'Container stopped', detail: 'Any discovered non-running container' },
+  { value: 'CONTAINER_RESTARTS', label: '容器重启风暴', detail: '10 分钟滚动窗口内新增重启次数' },
   { value: 'APP_UNHEALTHY', label: 'Application unhealthy', detail: 'Failed Agent-side health check' },
 ]
 
@@ -31,12 +33,20 @@ const form = reactive<AlertRulePayload>({
   durationSeconds: 300, severity: 'WARNING', serverId: null, enabled: true,
 })
 
-const isMetricRule = computed(() => form.metricType.startsWith('SERVER_'))
+const recommendedRules: AlertRulePayload[] = [
+  { name: 'Agent 持续离线', metricType: 'AGENT_OFFLINE', operator: 'EQ', threshold: 1, durationSeconds: 120, severity: 'CRITICAL', serverId: null, enabled: true },
+  { name: '应用健康检查失败', metricType: 'APP_UNHEALTHY', operator: 'EQ', threshold: 1, durationSeconds: 60, severity: 'CRITICAL', serverId: null, enabled: true },
+  { name: '容器重启风暴', metricType: 'CONTAINER_RESTARTS', operator: 'GTE', threshold: 3, durationSeconds: 0, severity: 'CRITICAL', serverId: null, enabled: true },
+]
+
+const isMetricRule = computed(() => form.metricType.startsWith('SERVER_') || form.metricType === 'CONTAINER_RESTARTS')
 const summary = computed(() => ({
   total: rules.value.length,
   enabled: rules.value.filter((rule) => rule.enabled).length,
   critical: rules.value.filter((rule) => rule.enabled && rule.severity === 'CRITICAL').length,
 }))
+const missingRecommended = computed(() => recommendedRules.filter((preset) =>
+  !rules.value.some((rule) => rule.metricType === preset.metricType && rule.serverId === null)))
 
 function labelForMetric(type: AlertMetricType) {
   return metricOptions.find((item) => item.value === type)?.label || type
@@ -50,9 +60,10 @@ function durationLabel(seconds: number) {
 }
 
 function conditionLabel(rule: AlertRule) {
-  if (!rule.metricType.startsWith('SERVER_')) return 'State is abnormal'
+  if (!rule.metricType.startsWith('SERVER_') && rule.metricType !== 'CONTAINER_RESTARTS') return 'State is abnormal'
   const symbols = { GT: '>', GTE: '≥', LT: '<', LTE: '≤', EQ: '=', NE: '≠' }
-  return `${symbols[rule.operator]} ${rule.threshold}% for ${durationLabel(rule.durationSeconds)}`
+  const unit = rule.metricType === 'CONTAINER_RESTARTS' ? ' 次 / 10m' : '%'
+  return `${symbols[rule.operator]} ${rule.threshold}${unit} for ${durationLabel(rule.durationSeconds)}`
 }
 
 async function load() {
@@ -83,7 +94,10 @@ function openEdit(rule: AlertRule) {
 
 function metricChanged() {
   if (isMetricRule.value) {
-    if (form.threshold === null) form.threshold = 90
+    if (form.metricType === 'CONTAINER_RESTARTS') {
+      form.operator = 'GTE'
+      form.threshold = 3
+    } else if (form.threshold === null || form.threshold > 100) form.threshold = 90
   } else {
     form.operator = 'EQ'
     form.threshold = 1
@@ -129,12 +143,25 @@ async function saveWebhook() {
   finally { webhookSaving.value = false }
 }
 
+async function addRecommendedRules() {
+  if (!missingRecommended.value.length) return
+  if (!window.confirm(`创建 ${missingRecommended.value.length} 条全局推荐规则？可在创建后分别调整阈值。`)) return
+  presetSaving.value = true
+  errorMessage.value = ''
+  try {
+    for (const preset of missingRecommended.value) await alertsApi.createRule({ ...preset })
+    await load()
+  } catch (error) {
+    errorMessage.value = apiErrorMessage(error, '无法创建推荐规则 Recommended rules')
+  } finally { presetSaving.value = false }
+}
+
 onMounted(async () => { await servers.load(); await load() })
 </script>
 
 <template>
   <section class="alerts-view">
-    <header class="page-heading alert-heading"><div><p class="eyebrow">INCIDENT DETECTION</p><h1>Alert rules</h1><span>Durable threshold evaluation across infrastructure and application health.</span></div><button v-if="auth.hasAnyRole(['ADMIN'])" class="primary-compact" @click="openCreate"><b>＋</b>Create rule</button></header>
+    <header class="page-heading alert-heading"><div><p class="eyebrow">异常检测 · INCIDENT DETECTION</p><h1>告警规则 Alert rules</h1><span>持续评估基础设施、容器和应用健康，并把状态变化送达 Webhook。</span></div><div v-if="auth.hasAnyRole(['ADMIN'])" class="heading-actions"><button v-if="missingRecommended.length" class="secondary-compact" :disabled="presetSaving" @click="addRecommendedRules">{{ presetSaving ? '创建中…' : `＋ 推荐规则 ${missingRecommended.length}` }}</button><button class="primary-compact" @click="openCreate"><b>＋</b>创建规则</button></div></header>
     <nav class="alert-tabs"><RouterLink to="/alerts">Events</RouterLink><RouterLink class="active" to="/alerts/rules">Rules</RouterLink></nav>
     <p v-if="errorMessage && !dialogOpen" class="inline-error">{{ errorMessage }}</p>
 
@@ -161,7 +188,7 @@ onMounted(async () => { await servers.load(); await load() })
     <div v-if="dialogOpen" class="modal-backdrop" @click.self="dialogOpen = false"><section class="server-dialog alert-rule-dialog" role="dialog" aria-modal="true"><header><div><span>ALERT POLICY</span><h2>{{ editingId ? 'Edit rule' : 'Create alert rule' }}</h2></div><button aria-label="Close" @click="dialogOpen = false">×</button></header><div class="dialog-body application-form">
       <label><span>Rule name</span><input v-model.trim="form.name" maxlength="120" placeholder="Production server CPU high" /></label>
       <div class="form-grid"><label><span>Metric type</span><select v-model="form.metricType" @change="metricChanged"><option v-for="item in metricOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select><small>{{ metricOptions.find((item) => item.value === form.metricType)?.detail }}</small></label><label><span>Server scope</span><select v-model="form.serverId"><option :value="null">All servers</option><option v-for="server in servers.servers" :key="server.id" :value="server.id">{{ server.name }}</option></select></label></div>
-      <div class="form-grid" v-if="isMetricRule"><label><span>Condition</span><select v-model="form.operator"><option value="GT">Greater than (&gt;)</option><option value="GTE">Greater than or equal (≥)</option><option value="LT">Less than (&lt;)</option><option value="LTE">Less than or equal (≤)</option><option value="EQ">Equal (=)</option><option value="NE">Not equal (≠)</option></select></label><label><span>Threshold (%)</span><input v-model.number="form.threshold" type="number" min="0" max="100" step="0.1" /></label></div>
+      <div class="form-grid" v-if="isMetricRule"><label><span>Condition</span><select v-model="form.operator"><option value="GT">Greater than (&gt;)</option><option value="GTE">Greater than or equal (≥)</option><option value="LT">Less than (&lt;)</option><option value="LTE">Less than or equal (≤)</option><option value="EQ">Equal (=)</option><option value="NE">Not equal (≠)</option></select></label><label><span>{{ form.metricType === 'CONTAINER_RESTARTS' ? '重启阈值 / 10 分钟' : 'Threshold (%)' }}</span><input v-model.number="form.threshold" type="number" :min="form.metricType === 'CONTAINER_RESTARTS' ? 1 : 0" :max="form.metricType === 'CONTAINER_RESTARTS' ? 10000 : 100" :step="form.metricType === 'CONTAINER_RESTARTS' ? 1 : 0.1" /></label></div>
       <div class="form-grid"><label><span>Sustained duration</span><select v-model.number="form.durationSeconds"><option :value="0">Immediate</option><option :value="30">30 seconds</option><option :value="60">1 minute</option><option :value="300">5 minutes</option><option :value="600">10 minutes</option><option :value="1800">30 minutes</option></select></label><label><span>Severity</span><select v-model="form.severity"><option value="INFO">Info</option><option value="WARNING">Warning</option><option value="CRITICAL">Critical</option></select></label></div>
       <label class="rule-enabled"><input v-model="form.enabled" type="checkbox" /><span>Enable rule immediately after saving</span></label>
       <p v-if="errorMessage" class="form-error"><span>!</span>{{ errorMessage }}</p>

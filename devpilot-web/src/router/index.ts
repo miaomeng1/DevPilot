@@ -94,6 +94,12 @@ const router = createRouter({
           meta: { title: 'Alert rules' },
         },
         {
+          path: 'maintenance',
+          name: 'maintenance',
+          component: () => import('@/views/MaintenanceView.vue'),
+          meta: { title: '备份与维护', roles: ['ADMIN'] },
+        },
+        {
           path: 'audit',
           name: 'audit',
           component: () => import('@/views/AuditView.vue'),

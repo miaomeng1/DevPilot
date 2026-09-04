@@ -2,6 +2,7 @@ package com.devpilot.server.cicd.controller;
 
 import com.devpilot.server.cicd.dto.CicdConfigurationRequest;
 import com.devpilot.server.cicd.dto.CicdConfigurationResponse;
+import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.PipelineRunResponse;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -51,6 +53,12 @@ public class CicdController {
     @GetMapping("/applications/{applicationId}/deployments")
     public ApiResponse<List<CicdDeploymentResponse>> deployments(@PathVariable Long applicationId) {
         return ApiResponse.success(deploymentService.list(applicationId));
+    }
+
+    @GetMapping("/activity")
+    public ApiResponse<List<CicdActivityResponse>> activity(
+            @RequestParam(defaultValue = "20") int limit) {
+        return ApiResponse.success(deploymentService.activity(limit));
     }
 
     @PostMapping("/applications/{applicationId}/deployments/{deploymentId}/rollback")

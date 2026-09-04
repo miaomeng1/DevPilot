@@ -137,9 +137,112 @@ class CicdIntegrationTests {
                 .andExpect(jsonPath("$.data[0].status", is("HEALTHY")))
                 .andExpect(jsonPath("$.data[0].providerDeploymentId").isEmpty());
 
+        mockMvc.perform(get("/api/cicd/activity").param("limit", "5")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].applicationName", is("Demo")))
+                .andExpect(jsonPath("$.data[0].environment", is("PRODUCTION")))
+                .andExpect(jsonPath("$.data[0].serverName", is("production")))
+                .andExpect(jsonPath("$.data[0].imageUri", is("ghcr.io/acme/demo:sha-abcdef123456")))
+                .andExpect(jsonPath("$.data[0].status", is("HEALTHY")));
+
         mockMvc.perform(post("/api/cicd/webhooks/demo").contentType(MediaType.APPLICATION_JSON)
                         .header("X-DevPilot-Signature", "sha256=00").content(success))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void successfulReleasesAreSerializedPerApplicationAndQueuedDurably() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                                 "deploymentWebhookUrl":"https://coolify.example/deploy/demo",
+                                 "autoDeploy":true,"productionApproval":true,"autoRollback":true,
+                                 "healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String secret = data(configured).path("oneTimeCallbackSecret").asText();
+        String imageA = "ghcr.io/acme/demo:sha-aaaaaaaaaaaa";
+        String imageB = "ghcr.io/acme/demo:sha-bbbbbbbbbbbb";
+
+        submitSuccessfulCallback(secret, "run-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", imageA);
+        String queued = callback("run-b", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "SUCCEEDED", "PASSED", "PASSED", imageB);
+        mockMvc.perform(post("/api/cicd/webhooks/demo").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(secret, queued)).content(queued))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.deployStatus", is("QUEUED")))
+                .andExpect(jsonPath("$.data.deployError").value(org.hamcrest.Matchers.containsString("自动继续")));
+
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_deployment", Long.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_pipeline_run WHERE deploy_status = 'QUEUED'", Long.class));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/demo", null, null, null, imageA);
+
+        reportHealth(fixture, "HEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        cicdDeploymentService.reconcileQueued();
+
+        org.junit.jupiter.api.Assertions.assertEquals("TRIGGERED", jdbcTemplate.queryForObject(
+                "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'run-b'", String.class));
+        org.junit.jupiter.api.Assertions.assertEquals(2L, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_deployment", Long.class));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/demo", null, null, null, imageB);
+    }
+
+    @Test
+    void criticalDiskWatermarkPausesAndAutomaticallyResumesRelease() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                                 "deploymentWebhookUrl":"https://coolify.example/deploy/demo",
+                                 "autoDeploy":true,"productionApproval":true,"autoRollback":true,
+                                 "healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String secret = data(configured).path("oneTimeCallbackSecret").asText();
+        Long serverId = jdbcTemplate.queryForObject("SELECT server_id FROM application WHERE id = ?", Long.class,
+                Long.parseLong(fixture.applicationId()));
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        long gib = 1024L * 1024L * 1024L;
+        jdbcTemplate.update("""
+                INSERT INTO server_metric
+                (id, server_id, collected_at, sample_count, cpu_usage, load_one, load_five, load_fifteen,
+                 memory_total, memory_used, memory_available, disk_total, disk_used, disk_free,
+                 network_bytes_sent, network_bytes_received, network_upload_rate, network_download_rate,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, 1, 5, 0.1, 0.1, 0.1, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
+                """, 991L, serverId, now, 8 * gib, 2 * gib, 6 * gib,
+                100 * gib, 96 * gib, 4 * gib, now, now);
+
+        String image = "ghcr.io/acme/demo:sha-cccccccccccc";
+        String body = callback("run-disk", "cccccccccccccccccccccccccccccccccccccccc",
+                "SUCCEEDED", "PASSED", "PASSED", image);
+        mockMvc.perform(post("/api/cicd/webhooks/demo").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(secret, body)).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.deployStatus", is("QUEUED")))
+                .andExpect(jsonPath("$.data.deployError").value(org.hamcrest.Matchers.containsString("磁盘保护")));
+        org.junit.jupiter.api.Assertions.assertEquals(0L,
+                jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_deployment", Long.class));
+
+        jdbcTemplate.update("UPDATE server_metric SET disk_used = ?, disk_free = ? WHERE id = ?",
+                50 * gib, 50 * gib, 991L);
+        cicdDeploymentService.reconcileQueued();
+
+        org.junit.jupiter.api.Assertions.assertEquals("TRIGGERED", jdbcTemplate.queryForObject(
+                "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'run-disk'", String.class));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/demo", null, null, null, image);
     }
 
     @Test

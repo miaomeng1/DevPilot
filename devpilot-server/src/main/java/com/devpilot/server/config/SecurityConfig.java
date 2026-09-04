@@ -42,6 +42,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/auth/setup").permitAll()
                         .requestMatchers("/api/agent/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/cicd/webhooks/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/maintenance/backups/report").permitAll()
                         .requestMatchers("/ws/logs", "/ws/agent/logs").permitAll()
                         .anyRequest().authenticated())
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)

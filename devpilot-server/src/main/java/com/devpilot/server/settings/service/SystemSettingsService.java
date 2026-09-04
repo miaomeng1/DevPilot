@@ -41,13 +41,13 @@ public class SystemSettingsService {
 
     public PublicSettingsResponse publicSettings() {
         return new PublicSettingsResponse(value(SYSTEM_NAME, "DevPilot"), blankToNull(value(LOGO_URL, null)),
-                value(DEFAULT_THEME, "DARK"), integer(LOG_LINES, 100));
+                value(DEFAULT_THEME, "LIGHT"), integer(LOG_LINES, 100));
     }
 
     public SystemSettingsResponse get() {
         WebhookConfigResponse webhook = alertSettingsService.get();
         return new SystemSettingsResponse(value(SYSTEM_NAME, "DevPilot"), blankToNull(value(LOGO_URL, null)),
-                value(DEFAULT_THEME, "DARK"), accessTokenTtlMinutes(), refreshTokenTtlHours(),
+                value(DEFAULT_THEME, "LIGHT"), accessTokenTtlMinutes(), refreshTokenTtlHours(),
                 heartbeatTimeoutSeconds(), metricIntervalSeconds(), integer(LOG_LINES, 100),
                 webhook.enabled(), webhook.configured(), webhook.destinationType());
     }

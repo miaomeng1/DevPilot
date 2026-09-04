@@ -10,12 +10,39 @@ const range = ref<MetricRange>('1h')
 const data = ref<MonitorData>()
 const loading = ref(false)
 const errorMessage = ref('')
+const copiedCommand = ref('')
 let pollTimer: number | undefined
+let copyTimer: number | undefined
 
 const summary = computed(() => data.value?.summary ?? {
   serverTotal: 0, serverOnline: 0, reportingServers: 0, averageCpuUsage: 0,
   averageMemoryUsage: 0, averageDiskUsage: 0, networkUploadRate: 0, networkDownloadRate: 0,
 })
+
+const gibibyte = 1024 ** 3
+const storagePriority = { critical: 2, warning: 1, healthy: 0 } as const
+const storageNodes = computed(() => (data.value?.servers || [])
+  .filter((server) => server.current)
+  .map((server) => {
+    const usage = server.current?.diskUsage ?? 0
+    const total = Number(server.current?.diskTotal || server.diskTotal || 0)
+    const free = Number(server.current?.diskFree || 0)
+    const lowFree = total >= 10 * gibibyte && free < 5 * gibibyte
+    const warningFree = total >= 10 * gibibyte && free < 10 * gibibyte
+    const state: keyof typeof storagePriority = usage >= 90 || lowFree
+      ? 'critical' : usage >= 80 || warningFree ? 'warning' : 'healthy'
+    return { server, usage, free, state }
+  })
+  .sort((left, right) => storagePriority[right.state] - storagePriority[left.state]
+    || right.usage - left.usage))
+const riskyStorageNodes = computed(() => storageNodes.value.filter((item) => item.state !== 'healthy').length)
+
+const cleanupChecks = [
+  { id: 'docker-df', title: '定位 Docker 占用', command: 'docker system df -v' },
+  { id: 'host-du', title: '定位主机大目录', command: 'sudo du -xhd1 /var/lib/docker /var/log 2>/dev/null | sort -h' },
+  { id: 'image-prune', title: '仅清理悬空镜像', command: 'docker image prune' },
+  { id: 'journal', title: '保留 7 天系统日志', command: 'sudo journalctl --vacuum-time=7d' },
+]
 
 function chartTime(value: string) {
   const date = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`)
@@ -71,25 +98,46 @@ async function load(silent = false) {
 
 function changeRange(value: MetricRange) { range.value = value; void load() }
 
+async function copyCommand(id: string, command: string) {
+  await navigator.clipboard.writeText(command)
+  copiedCommand.value = id
+  window.clearTimeout(copyTimer)
+  copyTimer = window.setTimeout(() => { copiedCommand.value = '' }, 1800)
+}
+
 onMounted(() => { void load(); pollTimer = window.setInterval(() => void load(true), 15_000) })
-onBeforeUnmount(() => window.clearInterval(pollTimer))
+onBeforeUnmount(() => { window.clearInterval(pollTimer); window.clearTimeout(copyTimer) })
 </script>
 
 <template>
   <section class="monitor-view">
-    <header class="page-heading monitor-heading"><div><p class="eyebrow">OBSERVABILITY</p><h1>Monitor center</h1><span>Fleet-wide utilization, throughput, and Agent freshness in one operational view.</span></div><button class="primary-compact" :disabled="loading" @click="load()">{{ loading ? 'Refreshing…' : '↻ Refresh' }}</button></header>
+    <header class="page-heading monitor-heading"><div><p class="eyebrow">可观测性 · OBSERVABILITY</p><h1>监控与容量中心</h1><span>统一查看资源利用率、吞吐、Agent 新鲜度与磁盘风险。</span></div><button class="primary-compact" :disabled="loading" @click="load()">{{ loading ? '刷新中…' : '↻ 刷新 Refresh' }}</button></header>
     <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
 
     <div class="monitor-summary">
-      <article><span>Fleet availability</span><strong>{{ summary.serverOnline }} / {{ summary.serverTotal }}</strong><small>{{ summary.reportingServers }} reporting telemetry</small></article>
-      <article><span>Average CPU</span><strong>{{ summary.averageCpuUsage.toFixed(1) }}%</strong><small>Across reporting servers</small></article>
-      <article><span>Average memory</span><strong>{{ summary.averageMemoryUsage.toFixed(1) }}%</strong><small>Across reporting servers</small></article>
-      <article><span>Average disk</span><strong>{{ summary.averageDiskUsage.toFixed(1) }}%</strong><small>Root filesystems</small></article>
-      <article><span>Network throughput</span><strong>{{ bytes(summary.networkDownloadRate, true) }}</strong><small>↑ {{ bytes(summary.networkUploadRate, true) }} aggregate</small></article>
+      <article><span>服务器可用 Fleet</span><strong>{{ summary.serverOnline }} / {{ summary.serverTotal }}</strong><small>{{ summary.reportingServers }} 台正在上报指标</small></article>
+      <article><span>平均 CPU</span><strong>{{ summary.averageCpuUsage.toFixed(1) }}%</strong><small>所有上报服务器</small></article>
+      <article><span>平均内存 Memory</span><strong>{{ summary.averageMemoryUsage.toFixed(1) }}%</strong><small>所有上报服务器</small></article>
+      <article><span>平均磁盘 Disk</span><strong>{{ summary.averageDiskUsage.toFixed(1) }}%</strong><small>根文件系统</small></article>
+      <article><span>网络吞吐 Network</span><strong>{{ bytes(summary.networkDownloadRate, true) }}</strong><small>↑ {{ bytes(summary.networkUploadRate, true) }} 汇总</small></article>
     </div>
 
+    <article class="storage-guard" :class="{ attention: riskyStorageNodes > 0 }">
+      <header><div><span>STORAGE GUARD</span><strong>{{ riskyStorageNodes ? `${riskyStorageNodes} 台服务器需要释放空间` : '磁盘水位安全' }}</strong><small>80% 预警 · 90% 高危 · 95% 或低于 2 GiB 时新发布自动排队</small></div><b>{{ riskyStorageNodes ? 'ACTION NEEDED' : 'PROTECTED' }}</b></header>
+      <div class="storage-guard-grid">
+        <section class="storage-node-list">
+          <RouterLink v-for="item in storageNodes" :key="item.server.id" :to="`/servers/${item.server.id}`" :class="item.state">
+            <div><i /><span><strong>{{ item.server.name }}</strong><small>{{ item.server.hostname || item.server.ip || '等待主机信息' }}</small></span></div>
+            <div class="storage-meter"><span><i :style="{ width: `${Math.min(item.usage, 100)}%` }" /></span><small>{{ item.usage.toFixed(1) }}% · {{ bytes(item.free) }} 可用</small></div>
+          </RouterLink>
+          <div v-if="!storageNodes.length" class="storage-no-data"><span>⌁</span><div><strong>等待磁盘指标</strong><small>Agent 上报后自动评估容量风险。</small></div></div>
+        </section>
+        <aside class="cleanup-playbook"><div class="cleanup-title"><strong>安全清理建议 Cleanup</strong><small>先定位再清理；DevPilot 不会自动删除数据。</small></div><ol><li v-for="check in cleanupChecks" :key="check.id"><div><strong>{{ check.title }}</strong><code>{{ check.command }}</code></div><button type="button" @click="copyCommand(check.id, check.command)">{{ copiedCommand === check.id ? '已复制' : '复制' }}</button></li></ol><p>不会推荐 <code>docker system prune -a --volumes</code>；该命令可能删除仍需保留的镜像和卷。</p></aside>
+      </div>
+    </article>
+
     <article class="detail-panel monitor-trend">
-      <header><div><strong>Fleet utilization trend</strong><small>Average CPU, memory, and disk across the control plane</small></div><div class="range-switch"><button v-for="item in (['1h','6h','24h','7d'] as MetricRange[])" :key="item" :class="{ active: range === item }" @click="changeRange(item)">{{ item }}</button></div></header>
+      <header><div><strong>资源趋势 Utilization trend</strong><small>控制面所有服务器 CPU、内存与磁盘平均值</small></div><div class="range-switch"><button v-for="item in (['1h','6h','24h','7d'] as MetricRange[])" :key="item" :class="{ active: range === item }" @click="changeRange(item)">{{ item }}</button></div></header>
       <BaseChart v-if="data?.trend.length" :option="chartOption" height="285px" />
       <div v-else class="metric-empty compact"><span>⌁</span><strong>Waiting for fleet telemetry</strong><small>Connect an Agent to populate the utilization timeline.</small></div>
     </article>

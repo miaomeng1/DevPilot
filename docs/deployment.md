@@ -74,10 +74,32 @@ Flyway applies forward-only database migrations during server startup. Do not ro
 
 `backup.sh` creates a mode-`0600` archive containing a transactionally consistent MySQL dump, `.env`, Compose definition, Nginx configuration, manifest and SHA-256 sidecar. The archive contains production secrets and must be encrypted, copied off-host and covered by retention policy. Redis contains short-retention raw metrics and is deliberately excluded; durable users, applications, audit history, alerts and CI/CD state live in MySQL.
 
+When `MAINTENANCE_REPORT_SECRET` and `DEV_PILOT_PUBLIC_URL` are present in `.env`, the script verifies the checksum locally and sends only signed metadata (archive filename, size, SHA-256 and creation time) to **Maintenance → Backup center**. The archive and its secrets never pass through the browser or DevPilot API. Hosted installs generate an independent 384-bit report secret automatically. Existing source installs should generate one with `openssl rand -hex 48`, add it to `.env`, and recreate `devpilot-server`.
+
 ```bash
 sudo /opt/devpilot/bin/backup.sh --backup-dir /mnt/encrypted/devpilot
 sha256sum -c /mnt/encrypted/devpilot/devpilot-*.tar.gz.sha256
 ```
+
+After one successful manual run, schedule a daily backup from the host root crontab:
+
+```bash
+(sudo crontab -l 2>/dev/null; echo '0 3 * * * /opt/devpilot/bin/backup.sh') | sudo crontab -
+```
+
+The default freshness target is 26 hours and can be overridden for the Server container with `BACKUP_FRESHNESS`. A green report proves that the local archive was created and checksum-verified; it does not prove off-host durability. Copy archives to an encrypted remote disk or S3-compatible destination and test restoration separately.
+
+For an automatic off-host copy, install AWS CLI v2 on the host and set `BACKUP_S3_URI` in `/opt/devpilot/.env`. AWS S3, MinIO, Cloudflare R2, and compatible stores are supported. Leave the access-key fields empty when the host has an instance role; otherwise use a credential restricted to the selected bucket prefix. For non-AWS providers, also set the endpoint URL.
+
+```dotenv
+BACKUP_S3_URI=s3://my-private-backups/devpilot
+BACKUP_S3_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
+BACKUP_S3_REGION=auto
+BACKUP_S3_ACCESS_KEY_ID=replace-with-scoped-key
+BACKUP_S3_SECRET_ACCESS_KEY=replace-with-scoped-secret
+```
+
+The script uploads both the archive and its portable checksum sidecar, then uses `HeadObject` to compare the remote object size with the local archive. Only then is the evidence marked `S3`. A failed remote copy leaves the verified local archive intact, reports it as `LOCAL`, and exits non-zero so cron or system monitoring can detect that off-host durability was not achieved. Configure bucket encryption, retention/lifecycle policy, and object-lock protection according to your provider.
 
 Test restores on an isolated host regularly. A restore is destructive, requires `--yes`, verifies safe archive paths and checksum when present, and refuses to proceed if the installed master key differs from the backup:
 
@@ -88,6 +110,8 @@ sudo /opt/devpilot/bin/restore.sh \
 ```
 
 For total host loss, install the same DevPilot release on a clean machine, stop the stack, replace its `.env` with the protected `environment.env` from the archive, start MySQL, then run the restore tool. Reconnect DNS/TLS only after login, Agent connectivity, encrypted CI/CD settings and a rollback dry run have been verified.
+
+After an isolated or staging restore, open **维护 Maintenance → 恢复演练 Restore drill**, select the exact backup evidence, record PASSED or FAILED, and note which checks were completed. This is a signed-in operator attestation, not an automated restore claim. Keep failed drills in the history so the recovery procedure can be corrected before an incident.
 
 ## Health and troubleshooting
 

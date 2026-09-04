@@ -120,6 +120,10 @@ Keep database, Redis, JWT and master-key variables in the deployment platform's 
 
 CI signs the exact JSON payload with HMAC-SHA256. DevPilot rejects forged callbacks, mismatched branches, failed gates, mutable image tags, and `sha-*` tags that do not match the reported commit. A first successful event is stored idempotently and triggers Coolify/Dokploy exactly once.
 
+Deployments are serialized per application. If another successful pipeline arrives while a release, verification, or rollback is active, DevPilot records it as `QUEUED` instead of racing the provider. The queue is stored in MySQL, survives a control-plane restart, and starts the oldest pending release automatically after the active deployment reaches a terminal state. Manual rollback is rejected while that application has an active deployment.
+
+Before starting a new release, DevPilot also checks fresh Agent disk telemetry for the target server. At 95% utilization, or below 2 GiB free on a normal-sized disk, the release stays `QUEUED` with an actionable reason. It resumes automatically after the next safe metric arrives. Emergency rollback remains available because restoring a known healthy version can be more important than the new-release guard.
+
 After provider acceptance, a deployment is not marked healthy immediately. DevPilot waits for a fresh Agent health result collected after the deployment stabilization window. A healthy result records the exact image as a verified release. An unhealthy result or timeout fails the deployment and, when enabled, deploys the latest previously verified healthy image. Administrators can also choose any healthy deployment in the CI/CD page and trigger a manual rollback.
 
 ## Local verification

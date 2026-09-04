@@ -59,7 +59,7 @@ export interface PipelineRun {
   imageDigest: string | null
   runUrl: string | null
   summary: string | null
-  deployStatus: 'NOT_STARTED' | 'TRIGGERING' | 'TRIGGERED' | 'HEALTHY' | 'HEALTH_FAILED' | 'FAILED'
+  deployStatus: 'NOT_STARTED' | 'QUEUED' | 'TRIGGERING' | 'TRIGGERED' | 'HEALTHY' | 'HEALTH_FAILED' | 'FAILED'
   deployError: string | null
   startedAt: string
   completedAt: string | null
@@ -75,11 +75,28 @@ export interface CicdDeployment {
   provider: DeploymentProvider
   imageUri: string
   previousImageUri: string | null
-  status: 'TRIGGERING' | 'TRIGGERED' | 'HEALTHY' | 'UNHEALTHY' | 'FAILED' | 'ROLLBACK_TRIGGERED'
+  status: 'TRIGGERING' | 'TRIGGERED' | 'VERIFYING' | 'HEALTHY' | 'UNHEALTHY' | 'FAILED' | 'ROLLBACK_TRIGGERED'
   providerDeploymentId: string | null
   logs: string | null
   startedAt: string
   healthDeadlineAt: string
+  completedAt: string | null
+  updatedAt: string
+}
+
+export interface CicdActivity {
+  id: string
+  applicationId: string
+  applicationName: string
+  environment: string
+  serverId: string | null
+  serverName: string
+  deploymentKind: 'RELEASE' | 'ROLLBACK'
+  provider: DeploymentProvider
+  imageUri: string
+  status: CicdDeployment['status']
+  logExcerpt: string | null
+  startedAt: string
   completedAt: string | null
   updatedAt: string
 }
@@ -99,6 +116,10 @@ export const cicdApi = {
   },
   async deployments(applicationId: string) {
     const response = await apiClient.get<ApiResponse<CicdDeployment[]>>(`/cicd/applications/${applicationId}/deployments`)
+    return response.data.data
+  },
+  async activity(limit = 20) {
+    const response = await apiClient.get<ApiResponse<CicdActivity[]>>('/cicd/activity', { params: { limit } })
     return response.data.data
   },
   async rollback(applicationId: string, deploymentId: string) {

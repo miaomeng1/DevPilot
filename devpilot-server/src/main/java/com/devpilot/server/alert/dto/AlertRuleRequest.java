@@ -9,7 +9,7 @@ import jakarta.validation.constraints.Size;
 
 public record AlertRuleRequest(
         @NotBlank @Size(max = 120) String name,
-        @NotBlank @Pattern(regexp = "SERVER_CPU|SERVER_MEMORY|SERVER_DISK|AGENT_OFFLINE|CONTAINER_STOPPED|APP_UNHEALTHY")
+        @NotBlank @Pattern(regexp = "SERVER_CPU|SERVER_MEMORY|SERVER_DISK|AGENT_OFFLINE|CONTAINER_STOPPED|CONTAINER_RESTARTS|APP_UNHEALTHY")
         String metricType,
         @NotBlank @Pattern(regexp = "GT|GTE|LT|LTE|EQ|NE") String operator,
         Double threshold,

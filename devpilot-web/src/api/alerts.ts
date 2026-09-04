@@ -1,6 +1,6 @@
 import { apiClient, type ApiResponse } from './client'
 
-export type AlertMetricType = 'SERVER_CPU' | 'SERVER_MEMORY' | 'SERVER_DISK' | 'AGENT_OFFLINE' | 'CONTAINER_STOPPED' | 'APP_UNHEALTHY'
+export type AlertMetricType = 'SERVER_CPU' | 'SERVER_MEMORY' | 'SERVER_DISK' | 'AGENT_OFFLINE' | 'CONTAINER_STOPPED' | 'CONTAINER_RESTARTS' | 'APP_UNHEALTHY'
 export type AlertOperator = 'GT' | 'GTE' | 'LT' | 'LTE' | 'EQ' | 'NE'
 export type AlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 export type AlertStatus = 'FIRING' | 'ACKNOWLEDGED' | 'RESOLVED'

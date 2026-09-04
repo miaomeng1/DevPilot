@@ -8,5 +8,7 @@ public record DashboardSummaryResponse(
         long applicationTotal,
         long applicationUnhealthy,
         long currentAlerts,
-        long todayDeployments) {
+        long todayDeployments,
+        long storageWarnings,
+        long storageCritical) {
 }

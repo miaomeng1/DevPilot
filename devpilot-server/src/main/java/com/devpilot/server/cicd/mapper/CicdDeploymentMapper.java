@@ -13,6 +13,9 @@ public interface CicdDeploymentMapper extends BaseMapper<CicdDeploymentEntity> {
     @Select("SELECT * FROM cicd_deployment WHERE application_id = #{applicationId} ORDER BY started_at DESC LIMIT #{limit}")
     List<CicdDeploymentEntity> selectRecent(@Param("applicationId") Long applicationId, @Param("limit") int limit);
 
+    @Select("SELECT * FROM cicd_deployment ORDER BY started_at DESC LIMIT #{limit}")
+    List<CicdDeploymentEntity> selectRecentAll(@Param("limit") int limit);
+
     @Select("SELECT * FROM cicd_deployment WHERE status IN ('TRIGGERED', 'VERIFYING') AND health_deadline_at <= #{deadline} ORDER BY started_at ASC LIMIT 100")
     List<CicdDeploymentEntity> selectTriggeredBefore(@Param("deadline") LocalDateTime deadline);
 
@@ -24,4 +27,8 @@ public interface CicdDeploymentMapper extends BaseMapper<CicdDeploymentEntity> {
 
     @Select("SELECT * FROM cicd_deployment WHERE application_id = #{applicationId} ORDER BY started_at DESC LIMIT 1")
     CicdDeploymentEntity selectLatest(@Param("applicationId") Long applicationId);
+
+    @Select("SELECT * FROM cicd_deployment WHERE application_id = #{applicationId} "
+            + "AND status IN ('TRIGGERING', 'TRIGGERED', 'VERIFYING') ORDER BY started_at ASC LIMIT 1")
+    CicdDeploymentEntity selectActive(@Param("applicationId") Long applicationId);
 }

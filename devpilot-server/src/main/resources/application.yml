@@ -65,3 +65,6 @@ devpilot:
     heartbeat-interval: ${AGENT_HEARTBEAT_INTERVAL:10s}
     heartbeat-timeout: ${AGENT_HEARTBEAT_TIMEOUT:30s}
     public-url: ${DEV_PILOT_PUBLIC_URL:http://localhost:8080}
+  maintenance:
+    report-secret: ${MAINTENANCE_REPORT_SECRET:}
+    backup-freshness: ${BACKUP_FRESHNESS:26h}

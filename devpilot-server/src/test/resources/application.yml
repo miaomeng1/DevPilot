@@ -24,3 +24,6 @@ devpilot:
     heartbeat-interval: 10s
     heartbeat-timeout: 30s
     public-url: http://localhost:8080
+  maintenance:
+    report-secret: test-maintenance-report-secret-at-least-thirty-two-bytes
+    backup-freshness: 26h

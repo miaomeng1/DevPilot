@@ -36,6 +36,7 @@ const navigation = computed(() => [
   { label: 'Nginx', code: 'NX', to: '/nginx' },
   { label: '监控 Monitor', code: 'MN', to: '/monitor' },
   { label: '告警 Alerts', code: 'AL', to: '/alerts' },
+  { label: '维护 Maintenance', code: 'MT', to: '/maintenance', adminOnly: true },
   { label: '审计 Audit', code: 'AU', to: '/audit', adminOnly: true },
   { label: '设置 Settings', code: 'ST', to: '/settings', adminOnly: true },
 ].filter((item) => !item.adminOnly || auth.hasAnyRole(['ADMIN'])))
@@ -43,6 +44,7 @@ const navigation = computed(() => [
 const commandItems = computed(() => [
   ...navigation.value.map(({ label, to }) => ({ label, to, detail: '工作台 Workspace' })),
   { label: '告警规则 Alert rules', to: '/alerts/rules', detail: '策略与 Webhooks' },
+  ...(auth.hasAnyRole(['ADMIN']) ? [{ label: '备份与维护 Maintenance', to: '/maintenance', detail: '备份证据与恢复' }] : []),
   ...(auth.hasAnyRole(['ADMIN']) ? [{ label: '用户管理 Users', to: '/settings/users', detail: '账号与角色' }] : []),
 ])
 

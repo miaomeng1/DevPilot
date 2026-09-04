@@ -15,6 +15,8 @@ export interface DashboardSummary {
   applicationUnhealthy: number
   currentAlerts: number
   todayDeployments: number
+  storageWarnings: number
+  storageCritical: number
 }
 
 export interface DashboardData {

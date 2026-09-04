@@ -12,7 +12,7 @@ const errorMessage = ref('')
 const webhookConfigured = ref(false)
 const webhookDestinationType = ref('NONE')
 const form = reactive<UpdateSystemSettings>({
-  systemName: 'DevPilot', logoUrl: '', defaultTheme: 'DARK', accessTokenTtlMinutes: 120,
+  systemName: 'DevPilot', logoUrl: '', defaultTheme: 'LIGHT', accessTokenTtlMinutes: 120,
   refreshTokenTtlHours: 168, agentHeartbeatTimeoutSeconds: 30, metricIntervalSeconds: 10,
   logDefaultLines: '100', webhookEnabled: false, webhookUrl: '',
 })

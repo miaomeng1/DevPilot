@@ -111,6 +111,8 @@ public class DockerInventoryService {
     private void upsert(Long serverId, AgentDockerContainerSnapshot snapshot, LocalDateTime now) {
         DockerContainerSnapshotEntity entity = containerMapper.selectByDockerId(serverId, snapshot.containerId());
         boolean insert = entity == null;
+        int previousRestartCount = entity == null || entity.getRestartCount() == null ? snapshot.restartCount()
+                : entity.getRestartCount();
         if (entity == null) {
             entity = new DockerContainerSnapshotEntity();
             entity.setServerId(serverId);
@@ -131,6 +133,15 @@ public class DockerInventoryService {
         entity.setPortsJson(json(snapshot.ports()));
         entity.setContainerCreatedAt(toUtc(snapshot.createdAt()));
         entity.setStartedAt(toUtc(snapshot.startedAt()));
+        int restartDelta = Math.max(0, snapshot.restartCount() - previousRestartCount);
+        if (insert || entity.getRestartWindowStartedAt() == null
+                || entity.getRestartWindowStartedAt().isBefore(now.minusMinutes(10))) {
+            entity.setRestartWindowStartedAt(now);
+            entity.setRestartWindowCount(restartDelta);
+        } else {
+            entity.setRestartWindowCount(Math.max(0, entity.getRestartWindowCount() == null
+                    ? restartDelta : entity.getRestartWindowCount() + restartDelta));
+        }
         entity.setRestartCount(snapshot.restartCount());
         entity.setNetworkMode(trimToNull(snapshot.networkMode()));
         entity.setVolumesJson(json(snapshot.volumes()));

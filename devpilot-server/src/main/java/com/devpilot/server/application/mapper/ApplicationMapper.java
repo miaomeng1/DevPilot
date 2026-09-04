@@ -18,6 +18,9 @@ public interface ApplicationMapper extends BaseMapper<ApplicationEntity> {
     @Select("SELECT * FROM application WHERE code = #{code}")
     ApplicationEntity selectByCode(@Param("code") String code);
 
+    @Select("SELECT * FROM application WHERE id = #{id} FOR UPDATE")
+    ApplicationEntity selectByIdForUpdate(@Param("id") Long id);
+
     @Select("""
             SELECT * FROM application
             WHERE server_id = #{serverId}

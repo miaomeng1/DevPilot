@@ -5,8 +5,10 @@ import BaseChart from '@/components/BaseChart.vue'
 import { dashboardApi, type DashboardData, type DashboardRange } from '@/api/dashboard'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { useThemeStore } from '@/stores/theme'
 
 const auth = useAuthStore()
+const theme = useThemeStore()
 const range = ref<DashboardRange>('1h')
 const data = ref<DashboardData>()
 const loading = ref(false)
@@ -16,13 +18,43 @@ let pollTimer: number | undefined
 const summary = computed(() => data.value?.summary ?? {
   serverTotal: 0, serverOnline: 0, containerTotal: 0, containerRunning: 0,
   applicationTotal: 0, applicationUnhealthy: 0, currentAlerts: 0, todayDeployments: 0,
+  storageWarnings: 0, storageCritical: 0,
 })
 const cards = computed(() => [
-  { label: 'Servers', value: summary.value.serverTotal, detail: `${summary.value.serverOnline} online`, tone: 'blue' },
-  { label: 'Docker', value: summary.value.containerTotal, detail: `${summary.value.containerRunning} running`, tone: 'violet' },
-  { label: 'Applications', value: summary.value.applicationTotal, detail: `${summary.value.applicationUnhealthy} abnormal`, tone: 'cyan' },
-  { label: 'Open alerts', value: summary.value.currentAlerts, detail: `${summary.value.todayDeployments} deployments today`, tone: 'green' },
+  { label: '服务器 Servers', value: summary.value.serverTotal, detail: `${summary.value.serverOnline} 台在线`, tone: 'blue' },
+  { label: '容器 Docker', value: summary.value.containerTotal, detail: `${summary.value.containerRunning} 个运行中`, tone: 'violet' },
+  { label: '应用 Applications', value: summary.value.applicationTotal, detail: `${summary.value.applicationUnhealthy} 个异常`, tone: 'cyan' },
+  { label: '待处理 Alerts', value: summary.value.currentAlerts, detail: `今日 ${summary.value.todayDeployments} 次发布`, tone: 'green' },
 ])
+const actionItems = computed(() => {
+  const offlineServers = Math.max(0, summary.value.serverTotal - summary.value.serverOnline)
+  const stoppedContainers = Math.max(0, summary.value.containerTotal - summary.value.containerRunning)
+  return [
+    summary.value.serverTotal === 0
+      ? { tone: 'setup', mark: '1', label: '连接第一台服务器', detail: '安装 Agent 后自动回传资源与容器', action: '开始连接', to: '/servers' }
+      : offlineServers > 0
+        ? { tone: 'attention', mark: '!', label: `${offlineServers} 台服务器离线`, detail: '检查 Agent、网络和心跳状态', action: '立即检查', to: '/servers' }
+        : { tone: 'done', mark: '✓', label: '服务器连接正常', detail: `${summary.value.serverOnline} 台 Agent 正在回传数据`, action: '查看', to: '/servers' },
+    summary.value.containerTotal === 0
+      ? { tone: 'setup', mark: '2', label: '等待发现 Docker 容器', detail: 'Agent 会自动建立运行清单', action: '查看清单', to: '/docker' }
+      : stoppedContainers > 0
+        ? { tone: 'attention', mark: '!', label: `${stoppedContainers} 个容器未运行`, detail: '确认是否为预期停止状态', action: '检查容器', to: '/docker' }
+        : { tone: 'done', mark: '✓', label: 'Docker 负载运行正常', detail: `${summary.value.containerRunning} 个容器正在运行`, action: '查看', to: '/docker' },
+    summary.value.applicationTotal === 0
+      ? { tone: 'setup', mark: '3', label: '纳管你的第一个应用', detail: '从已发现容器一键导入', action: '自动发现', to: '/applications' }
+      : summary.value.applicationUnhealthy > 0
+        ? { tone: 'attention', mark: '!', label: `${summary.value.applicationUnhealthy} 个应用需要处理`, detail: '运行状态或健康检查异常', action: '定位问题', to: '/applications' }
+        : { tone: 'done', mark: '✓', label: '应用健康检查正常', detail: `${summary.value.applicationTotal} 个服务已纳管`, action: '查看', to: '/applications' },
+    summary.value.currentAlerts > 0
+      ? { tone: 'attention', mark: '!', label: `${summary.value.currentAlerts} 条活动告警`, detail: '请确认影响并处理或确认告警', action: '进入告警', to: '/alerts' }
+      : { tone: 'done', mark: '✓', label: '当前没有活动告警', detail: '所有已配置指标均在阈值内', action: '告警策略', to: '/alerts/rules' },
+    summary.value.storageCritical > 0
+      ? { tone: 'attention', mark: '!', label: `${summary.value.storageCritical} 台服务器磁盘高危`, detail: '磁盘达到 90%；95% 后新发布会自动排队', action: '安全清理', to: '/monitor' }
+      : summary.value.storageWarnings > 0
+        ? { tone: 'attention', mark: '!', label: `${summary.value.storageWarnings} 台服务器磁盘预警`, detail: '磁盘达到 80%，建议现在检查增长来源', action: '查看建议', to: '/monitor' }
+        : { tone: 'done', mark: '✓', label: '磁盘容量处于安全水位', detail: '80% 预警 · 95% 暂停新发布', action: '容量详情', to: '/monitor' },
+  ]
+})
 
 function timestamp(value: string) {
   const parsed = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value}Z`)
@@ -32,7 +64,7 @@ function timestamp(value: string) {
 const chartOption = computed<EChartsCoreOption>(() => ({
   animationDuration: 450,
   color: ['#3b82f6', '#8b5cf6'],
-  tooltip: { trigger: 'axis', backgroundColor: '#101828', borderColor: 'rgba(148,163,184,.22)', textStyle: { color: '#e5edf9', fontSize: 10 } },
+  tooltip: { trigger: 'axis', backgroundColor: theme.mode === 'light' ? '#ffffff' : '#101828', borderColor: 'rgba(148,163,184,.22)', textStyle: { color: theme.mode === 'light' ? '#18243a' : '#e5edf9', fontSize: 10 } },
   legend: { right: 8, top: 0, textStyle: { color: '#718096', fontSize: 9 }, itemWidth: 9, itemHeight: 5 },
   grid: { left: 42, right: 18, top: 42, bottom: 27 },
   xAxis: { type: 'category', boundaryGap: false, data: data.value?.trend.map((point) => timestamp(point.timestamp)) ?? [], axisLine: { lineStyle: { color: 'rgba(148,163,184,.13)' } }, axisLabel: { color: '#617087', fontSize: 8 }, axisTick: { show: false } },
@@ -82,8 +114,8 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 <template>
   <section class="dashboard-view">
     <header class="page-heading">
-      <div><p class="eyebrow">WORKSPACE OVERVIEW</p><h1>Infrastructure at a glance.</h1><span>Live control-plane health and resource telemetry.</span></div>
-      <RouterLink class="add-server-preview" to="/servers"><span>{{ auth.hasAnyRole(['ADMIN']) ? '＋' : '↗' }}</span>{{ auth.hasAnyRole(['ADMIN']) ? 'Add server' : 'View servers' }} <small>{{ auth.hasAnyRole(['ADMIN']) ? 'Connect Agent' : 'Infrastructure' }}</small></RouterLink>
+      <div><p class="eyebrow">运维总览 · WORKSPACE OVERVIEW</p><h1>今天需要关注什么？</h1><span>服务器、应用、发布与告警，一屏掌握。</span></div>
+      <RouterLink class="add-server-preview" to="/servers"><span>{{ auth.hasAnyRole(['ADMIN']) ? '＋' : '↗' }}</span>{{ auth.hasAnyRole(['ADMIN']) ? '连接服务器' : '查看服务器' }} <small>{{ auth.hasAnyRole(['ADMIN']) ? 'Connect Agent' : 'Infrastructure' }}</small></RouterLink>
     </header>
 
     <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
@@ -95,19 +127,16 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 
     <div class="dashboard-grid">
       <article class="empty-panel metrics-preview live-metrics-panel">
-        <header><div><strong>Infrastructure pulse</strong><small>Average usage across connected servers</small></div><div class="range-switch"><button v-for="item in (['1h','6h','24h'] as DashboardRange[])" :key="item" :class="{ active: range === item }" @click="changeRange(item)">{{ item }}</button></div></header>
+        <header><div><strong>基础设施脉搏 Infrastructure pulse</strong><small>所有在线服务器的平均资源使用率</small></div><div class="range-switch"><button v-for="item in (['1h','6h','24h'] as DashboardRange[])" :key="item" :class="{ active: range === item }" @click="changeRange(item)">{{ item }}</button></div></header>
         <div v-if="data?.trend.length" class="dashboard-chart"><BaseChart :option="chartOption" height="250px" /></div>
-        <div v-else class="metric-empty"><span>⌁</span><strong>Waiting for telemetry</strong><small>Charts appear after a connected Agent uploads its first metric sample.</small></div>
+        <div v-else class="metric-empty"><span>⌁</span><strong>等待监控数据 Waiting for telemetry</strong><small>Agent 上传第一批指标后，这里会自动出现趋势图。</small></div>
         <footer><span><i class="blue" />CPU</span><span><i class="violet" />Memory</span><small>{{ data?.trend.length || 0 }} aggregate points</small></footer>
       </article>
 
       <article class="empty-panel readiness-panel">
-        <header><div><strong>Platform signals</strong><small>Current operational inventory</small></div><span class="ready-pill">LIVE</span></header>
+        <header><div><strong>行动中心 Action center</strong><small>按优先级给出下一步操作</small></div><span class="ready-pill">LIVE</span></header>
         <ol>
-          <li :class="{ done: summary.serverOnline > 0 }"><b>{{ summary.serverOnline > 0 ? '✓' : '1' }}</b><div><strong>Connected infrastructure</strong><small>{{ summary.serverOnline }} of {{ summary.serverTotal }} servers online</small></div></li>
-          <li :class="{ done: summary.containerRunning > 0 }"><b>{{ summary.containerRunning > 0 ? '✓' : '2' }}</b><div><strong>Docker workloads</strong><small>{{ summary.containerRunning }} of {{ summary.containerTotal }} containers running</small></div></li>
-          <li :class="{ done: summary.applicationTotal > 0 }"><b>{{ summary.applicationTotal > 0 ? '✓' : '3' }}</b><div><strong>Managed applications</strong><small>{{ summary.applicationTotal }} applications, {{ summary.applicationUnhealthy }} abnormal</small></div></li>
-          <li :class="{ done: summary.currentAlerts === 0 }"><b>{{ summary.currentAlerts === 0 ? '✓' : '4' }}</b><div><strong>Active alert state</strong><small>{{ summary.currentAlerts ? `${summary.currentAlerts} alerts need attention` : 'No active alerts' }}</small></div></li>
+          <li v-for="item in actionItems" :key="item.label" :class="item.tone"><b>{{ item.mark }}</b><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><RouterLink :to="item.to">{{ item.action }} →</RouterLink></li>
         </ol>
       </article>
     </div>

@@ -161,7 +161,7 @@ public class CicdService {
         run.setUpdatedAt(timestamp);
         if (create) pipelineMapper.insert(run); else pipelineMapper.updateById(run);
         if (firstSuccessfulEvent && configuration.getAutoDeploy() == 1) {
-            deploymentService.triggerRelease(configuration, run);
+            deploymentService.requestRelease(configuration, run);
         }
         return toRun(run);
     }

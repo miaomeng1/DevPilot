@@ -5,6 +5,7 @@ import com.devpilot.server.application.entity.ApplicationEntity;
 import com.devpilot.server.application.mapper.ApplicationDeploymentMapper;
 import com.devpilot.server.application.mapper.ApplicationMapper;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
+import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.entity.CicdConfigurationEntity;
 import com.devpilot.server.cicd.entity.CicdDeploymentEntity;
 import com.devpilot.server.cicd.entity.CicdPipelineRunEntity;
@@ -13,8 +14,12 @@ import com.devpilot.server.cicd.mapper.CicdDeploymentMapper;
 import com.devpilot.server.cicd.mapper.CicdPipelineRunMapper;
 import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
 import com.devpilot.server.exception.BusinessException;
+import com.devpilot.server.metric.dto.MetricPointResponse;
+import com.devpilot.server.metric.service.MetricService;
 import com.devpilot.server.security.DevPilotPrincipal;
 import com.devpilot.server.security.SensitiveSettingCipher;
+import com.devpilot.server.node.dto.ServerNodeResponse;
+import com.devpilot.server.node.service.ServerNodeService;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -27,6 +32,9 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class CicdDeploymentService {
     private static final int HEALTH_STABILIZATION_SECONDS = 15;
+    private static final long GIBIBYTE = 1024L * 1024L * 1024L;
+    private static final double DEPLOYMENT_DISK_LIMIT_PERCENT = 95.0;
+    private static final long DEPLOYMENT_MINIMUM_FREE_BYTES = 2L * GIBIBYTE;
     private final CicdDeploymentMapper deploymentMapper;
     private final CicdPipelineRunMapper pipelineMapper;
     private final CicdConfigurationMapper configurationMapper;
@@ -34,9 +42,26 @@ public class CicdDeploymentService {
     private final ApplicationDeploymentMapper applicationDeploymentMapper;
     private final DeploymentWebhookClient providerClient;
     private final SensitiveSettingCipher cipher;
+    private final ServerNodeService serverNodeService;
+    private final MetricService metricService;
 
     @Transactional
-    public CicdDeploymentResponse triggerRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
+    public void requestRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
+        ApplicationEntity application = lockApplication(configuration.getApplicationId());
+        CicdDeploymentEntity active = deploymentMapper.selectActive(configuration.getApplicationId());
+        if (active != null) {
+            queue(run, "已有发布正在执行，完成后将自动继续（deployment " + active.getId() + "）");
+            return;
+        }
+        String storageBlock = storageBlock(application);
+        if (storageBlock != null) {
+            queue(run, storageBlock);
+            return;
+        }
+        startRelease(configuration, run);
+    }
+
+    private void startRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
         CicdDeploymentEntity previous = deploymentMapper.selectLatestHealthy(run.getApplicationId());
         CicdDeploymentEntity deployment = create(configuration, run.getId(), null, "RELEASE", run.getImageUri(),
                 previous == null ? null : previous.getImageUri(), configuration.getCreatedBy());
@@ -45,7 +70,6 @@ public class CicdDeploymentService {
         run.setUpdatedAt(now());
         pipelineMapper.updateById(run);
         triggerProvider(configuration, deployment, run);
-        return toResponse(deployment);
     }
 
     public List<CicdDeploymentResponse> list(Long applicationId) {
@@ -54,9 +78,19 @@ public class CicdDeploymentService {
                 .map(CicdDeploymentService::toResponse).toList();
     }
 
+    public List<CicdActivityResponse> activity(int requestedLimit) {
+        int limit = Math.max(1, Math.min(requestedLimit, 100));
+        return deploymentMapper.selectRecentAll(limit).stream().map(this::toActivityResponse).toList();
+    }
+
     @Transactional
     public CicdDeploymentResponse rollback(Long applicationId, Long targetDeploymentId, DevPilotPrincipal principal) {
         requireApplication(applicationId);
+        lockApplication(applicationId);
+        CicdDeploymentEntity active = deploymentMapper.selectActive(applicationId);
+        if (active != null) {
+            throw BusinessException.conflict(40941, "当前已有发布或回滚正在执行，请完成后再操作");
+        }
         CicdConfigurationEntity configuration = requireConfiguration(applicationId);
         CicdDeploymentEntity target = deploymentMapper.selectById(targetDeploymentId);
         if (target == null || !applicationId.equals(target.getApplicationId()) || !"HEALTHY".equals(target.getStatus())) {
@@ -78,9 +112,11 @@ public class CicdDeploymentService {
     @Transactional
     public void reconcileTriggered() {
         LocalDateTime timestamp = now();
-        for (CicdDeploymentEntity deployment : deploymentMapper.selectTriggered()) {
-            ApplicationEntity application = applicationMapper.selectById(deployment.getApplicationId());
+        for (CicdDeploymentEntity candidate : deploymentMapper.selectTriggered()) {
+            ApplicationEntity application = applicationMapper.selectByIdForUpdate(candidate.getApplicationId());
             if (application == null) continue;
+            CicdDeploymentEntity deployment = deploymentMapper.selectById(candidate.getId());
+            if (deployment == null || !active(deployment.getStatus())) continue;
             refreshProviderLogs(deployment);
             CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(deployment.getApplicationId());
             if (configuration != null && "API".equals(valueOr(configuration.getDeploymentMode(), "WEBHOOK"))
@@ -119,6 +155,33 @@ public class CicdDeploymentService {
                 markUnhealthyAndRollback(deployment, application, timestamp,
                         freshProbe ? "Application health check reported UNHEALTHY" : "Health verification timed out");
             }
+        }
+    }
+
+    @Scheduled(fixedDelayString = "${devpilot.cicd.queue-reconcile-interval:10s}",
+            initialDelayString = "${devpilot.cicd.queue-reconcile-initial-delay:25s}")
+    @Transactional
+    public void reconcileQueued() {
+        for (Long applicationId : pipelineMapper.selectQueuedApplicationIds()) {
+            ApplicationEntity application = applicationMapper.selectByIdForUpdate(applicationId);
+            if (application == null) continue;
+            if (deploymentMapper.selectActive(applicationId) != null) continue;
+            CicdPipelineRunEntity run = pipelineMapper.selectOldestQueued(applicationId);
+            if (run == null) continue;
+            CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(applicationId);
+            if (configuration == null || configuration.getAutoDeploy() != 1) {
+                run.setDeployStatus("NOT_STARTED");
+                run.setDeployError("自动部署已关闭；本次排队发布未执行");
+                run.setUpdatedAt(now());
+                pipelineMapper.updateById(run);
+                continue;
+            }
+            String storageBlock = storageBlock(application);
+            if (storageBlock != null) {
+                queue(run, storageBlock);
+                continue;
+            }
+            startRelease(configuration, run);
         }
     }
 
@@ -257,6 +320,41 @@ public class CicdDeploymentService {
         return application;
     }
 
+    private ApplicationEntity lockApplication(Long applicationId) {
+        ApplicationEntity application = applicationMapper.selectByIdForUpdate(applicationId);
+        if (application == null) {
+            throw BusinessException.notFound(40420, "应用不存在");
+        }
+        return application;
+    }
+
+    private void queue(CicdPipelineRunEntity run, String reason) {
+        run.setDeployStatus("QUEUED");
+        run.setDeployError(truncate(reason, 1000));
+        run.setUpdatedAt(now());
+        pipelineMapper.updateById(run);
+    }
+
+    private String storageBlock(ApplicationEntity application) {
+        MetricPointResponse metric = metricService.current(application.getServerId());
+        if (metric == null || metric.timestamp() == null || metric.timestamp().isBefore(now().minusMinutes(10))) {
+            return null;
+        }
+        boolean percentCritical = metric.diskUsage() != null
+                && metric.diskUsage() >= DEPLOYMENT_DISK_LIMIT_PERCENT;
+        boolean freeSpaceCritical = metric.diskTotal() != null && metric.diskTotal() >= 10L * GIBIBYTE
+                && metric.diskFree() != null && metric.diskFree() < DEPLOYMENT_MINIMUM_FREE_BYTES;
+        if (!percentCritical && !freeSpaceCritical) return null;
+        String usage = metric.diskUsage() == null ? "未知" : String.format(java.util.Locale.ROOT, "%.1f", metric.diskUsage());
+        return "磁盘保护已暂停发布：当前使用率 " + usage
+                + "%、可用 " + formatGiB(metric.diskFree()) + " GiB；清理后会自动继续";
+    }
+
+    private static String formatGiB(Long bytes) {
+        if (bytes == null) return "未知";
+        return String.format(java.util.Locale.ROOT, "%.1f", bytes.doubleValue() / GIBIBYTE);
+    }
+
     private CicdConfigurationEntity requireConfiguration(Long applicationId) {
         CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(applicationId);
         if (configuration == null) throw BusinessException.notFound(40440, "CI/CD 配置不存在");
@@ -273,6 +371,21 @@ public class CicdDeploymentService {
                 entity.getPreviousImageUri(), entity.getStatus(), entity.getProviderDeploymentId(), entity.getLogs(),
                 entity.getTriggeredBy(), entity.getStartedAt(), entity.getHealthDeadlineAt(), entity.getCompletedAt(),
                 entity.getUpdatedAt());
+    }
+
+    private CicdActivityResponse toActivityResponse(CicdDeploymentEntity entity) {
+        ApplicationEntity application = applicationMapper.selectById(entity.getApplicationId());
+        if (application == null) {
+            return new CicdActivityResponse(entity.getId(), entity.getApplicationId(), "已删除应用", "UNKNOWN",
+                    null, "未知服务器", entity.getDeploymentKind(), entity.getProvider(), entity.getImageUri(),
+                    entity.getStatus(), excerpt(entity.getLogs()), entity.getStartedAt(), entity.getCompletedAt(),
+                    entity.getUpdatedAt());
+        }
+        ServerNodeResponse server = serverNodeService.get(application.getServerId());
+        return new CicdActivityResponse(entity.getId(), entity.getApplicationId(), application.getName(),
+                application.getEnvironment(), application.getServerId(), server.name(), entity.getDeploymentKind(),
+                entity.getProvider(), entity.getImageUri(), entity.getStatus(), excerpt(entity.getLogs()),
+                entity.getStartedAt(), entity.getCompletedAt(), entity.getUpdatedAt());
     }
 
     private static String versionOf(String imageUri) {
@@ -292,8 +405,18 @@ public class CicdDeploymentService {
         return truncate(value == null || value.isBlank() ? "Deployment provider request failed" : value, 1000);
     }
 
+    private static String excerpt(String value) {
+        if (value == null || value.isBlank()) return null;
+        String compact = value.replace('\r', ' ').replace('\n', ' ').replaceAll("\\s+", " ").trim();
+        return truncate(compact, 240);
+    }
+
     private static String valueOr(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private static boolean active(String status) {
+        return "TRIGGERING".equals(status) || "TRIGGERED".equals(status) || "VERIFYING".equals(status);
     }
 
     private static String truncate(String value, int maximum) {
