@@ -29,10 +29,14 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `GET|PUT /api/cicd/configurations/{applicationId}`
 - `GET /api/cicd/applications/{applicationId}/runs`
 - `GET /api/cicd/applications/{applicationId}/deployments`
+- `GET|PUT /api/cicd/applications/{applicationId}/environment`
+- `POST /api/cicd/applications/{applicationId}/environment/sync`
 - `POST /api/cicd/applications/{applicationId}/deployments/{deploymentId}/rollback`
 - Signed CI callback: `POST /api/cicd/webhooks/{applicationCode}` with `X-DevPilot-Signature: sha256=<HMAC>`
 
 Provider URLs and tokens are write-only encrypted settings. Deployment responses include the immutable image, provider deployment ID, collected provider logs, health deadline and rollback linkage, but never provider credentials.
+
+Application environment values are all AES-GCM encrypted at rest. Secret values are never returned by the API and may be preserved by sending `null` on a later revision. `PUT` requires `expectedRevision`; stale writes return `409`. Coolify API mode supports safe key-level synchronization. Provider synchronization deletes only keys previously managed by DevPilot and runs before image deployment when the saved revision is dirty.
 
 ## Applications, Nginx, and alerts
 

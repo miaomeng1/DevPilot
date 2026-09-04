@@ -45,7 +45,7 @@
 
 - [x] 仓库接入向导与 GitHub Actions / GitLab CI / Woodpecker 可执行 Workflow 生成器
 - [ ] Preview / Staging 环境与临时访问地址
-- [ ] 环境变量模板、差异预览与敏感值加密
+- [x] 环境变量模板、Revision 差异预览、全量加密与 Coolify 安全增量同步
 - [x] Compose 项目（Stack）自动分组、关联服务视图与可审计的顺序重启
 - [ ] 常用个人服务模板，但模板默认不暴露高风险端口
 

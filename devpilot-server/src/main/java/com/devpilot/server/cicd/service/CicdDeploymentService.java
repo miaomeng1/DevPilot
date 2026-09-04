@@ -41,6 +41,7 @@ public class CicdDeploymentService {
     private final ApplicationMapper applicationMapper;
     private final ApplicationDeploymentMapper applicationDeploymentMapper;
     private final DeploymentWebhookClient providerClient;
+    private final ApplicationEnvironmentService environmentService;
     private final SensitiveSettingCipher cipher;
     private final ServerNodeService serverNodeService;
     private final MetricService metricService;
@@ -226,6 +227,7 @@ public class CicdDeploymentService {
     private void triggerProvider(CicdConfigurationEntity configuration, CicdDeploymentEntity deployment,
                                  CicdPipelineRunEntity run) {
         try {
+            environmentService.syncForDeployment(configuration);
             String mode = valueOr(configuration.getDeploymentMode(), "WEBHOOK");
             String externalId = providerClient.deploy(configuration.getDeploymentProvider(), mode,
                     decrypt(configuration.getDeploymentWebhookCipher()), decrypt(configuration.getProviderBaseUrlCipher()),

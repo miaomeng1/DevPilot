@@ -26,6 +26,14 @@ After saving an application CI/CD configuration, open **仓库接入向导 · Re
 
 The generated pipeline includes its own quality gate, Trivy source/dependency/secret/IaC scan, immutable `sha-<commit>` image build, serialized production task, and signed DevPilot callback. It never embeds the callback secret. Create every listed variable in the CI platform's protected secret store and use the one-time secret shown by DevPilot. If the generated callback URL contains `localhost` or `127.0.0.1`, first expose DevPilot through a production DNS name with HTTPS and regenerate the file; a hosted CI runner cannot reach a loopback address.
 
+## Runtime environment and secrets
+
+The release center includes reusable Web, database, and S3-compatible templates plus a custom variable editor. DevPilot encrypts every value at rest, never returns Secret values, removes values from audit payloads, and uses an optimistic Revision check so an older browser tab cannot overwrite a newer edit. The review panel shows keys that will be added, changed, or removed before Save is enabled.
+
+For **Coolify API mode**, DevPilot uses the official per-application [list](https://next.coolify.io/docs/api/endpoints/applications/list-envs-by-application-uuid), [create](https://next.coolify.io/docs/api/endpoints/applications/create-env-by-application-uuid), [update](https://next.coolify.io/docs/api/endpoints/applications/update-env-by-application-uuid), and [delete](https://next.coolify.io/docs/api/endpoints/applications/delete-env-by-application-uuid) endpoints. It upserts desired keys and deletes only keys that a previous successful DevPilot sync managed. Give the provider token the minimum `read:sensitive`, `write`, and `deploy` scopes required by these operations. A dirty Revision is synchronized before the image is changed, so a failed environment sync blocks that release.
+
+DevPilot intentionally does not automate Dokploy environment replacement yet. Dokploy's current `application.saveEnvironment` operation replaces the complete block; its upstream project documents that partial automation can [delete existing secrets](https://github.com/Dokploy/dokploy/issues/4525). The UI explains this limitation and the deployment gate stops rather than silently running with unsynchronized values.
+
 GitHub Actions publishes each component as a multi-platform manifest for
 `linux/amd64` and `linux/arm64`. Build stages run on the native builder platform
 and BuildKit cross-compiles the Agent, while QEMU is available for the small

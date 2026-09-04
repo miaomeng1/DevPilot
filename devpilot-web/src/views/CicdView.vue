@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { applicationApi, type Application } from '@/api/applications'
-import { cicdApi, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type PipelineRun } from '@/api/cicd'
+import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
@@ -24,9 +24,39 @@ const onboardingOpen = ref(false)
 const runtimePreset = ref<RuntimePreset>('NODE')
 const runtimePresets: RuntimePreset[] = ['NODE', 'JAVA', 'GO', 'DOCKER']
 const imageRepository = ref('')
+const environment = ref<ApplicationEnvironment | null>(null)
+const environmentDraft = ref<EnvironmentDraftVariable[]>([])
+const environmentOpen = ref(false)
+const environmentSaving = ref(false)
+const environmentSyncing = ref(false)
 const runFilter = ref('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
+
+interface EnvironmentDraftVariable {
+  key: string
+  value: string
+  secret: boolean
+  description: string
+}
+
+const environmentTemplates = [
+  { id: 'web', name: 'Web 服务', detail: 'Runtime basics', variables: [
+    { key: 'APP_ENV', value: 'production', secret: false, description: '应用运行环境' },
+    { key: 'LOG_LEVEL', value: 'info', secret: false, description: '日志级别' },
+    { key: 'PORT', value: '3000', secret: false, description: '容器监听端口' },
+  ] },
+  { id: 'database', name: '数据库连接', detail: 'Database', variables: [
+    { key: 'DATABASE_URL', value: '', secret: true, description: '完整数据库连接串' },
+    { key: 'DB_POOL_SIZE', value: '10', secret: false, description: '连接池大小' },
+  ] },
+  { id: 'object-storage', name: '对象存储', detail: 'S3 compatible', variables: [
+    { key: 'S3_ENDPOINT', value: '', secret: false, description: 'S3 API 地址' },
+    { key: 'S3_BUCKET', value: '', secret: false, description: 'Bucket 名称' },
+    { key: 'S3_ACCESS_KEY', value: '', secret: true, description: 'Access key' },
+    { key: 'S3_SECRET_KEY', value: '', secret: true, description: 'Secret key' },
+  ] },
+]
 
 const form = reactive<CicdConfigurationPayload>({
   repositoryProvider: 'GITHUB', repositoryUrl: '', branchName: 'main', deploymentProvider: 'COOLIFY', deploymentMode: 'API',
@@ -109,6 +139,34 @@ const generatedWorkflow = computed(() => {
   })
 })
 const callbackIsLocal = computed(() => /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b/.test(callbackAbsoluteUrl.value))
+const environmentOriginal = computed(() => new Map((environment.value?.variables || []).map((item) => [item.key, item])))
+const environmentValidation = computed(() => {
+  const keys = new Set<string>()
+  for (const item of environmentDraft.value) {
+    const key = item.key.trim()
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return `${key || '空 Key'} 不是有效环境变量名`
+    if (keys.has(key)) return `${key} 重复，请合并后再保存`
+    keys.add(key)
+    const previous = environmentOriginal.value.get(key)
+    if (item.secret && !previous?.secret && !item.value) return `${key} 是新 Secret，必须填写初始值`
+    if (!item.secret && previous?.secret && !item.value) return `${key} 从 Secret 改为普通变量时必须填写新值`
+  }
+  return ''
+})
+const environmentDiff = computed(() => {
+  const original = environmentOriginal.value
+  const draft = new Map(environmentDraft.value.map((item) => [item.key.trim(), item]))
+  const added = [...draft.values()].filter((item) => !original.has(item.key.trim())).map((item) => item.key.trim())
+  const removed = [...original.keys()].filter((key) => !draft.has(key))
+  const changed = [...draft.values()].filter((item) => {
+    const previous = original.get(item.key.trim())
+    if (!previous) return false
+    return previous.secret !== item.secret || (previous.description || '') !== item.description
+      || (previous.secret ? item.value.length > 0 : previous.value !== item.value)
+  }).map((item) => item.key.trim())
+  return { added, removed, changed, total: added.length + removed.length + changed.length }
+})
+const environmentSyncSupported = computed(() => configuration.value?.deploymentProvider === 'COOLIFY' && configuration.value?.deploymentMode === 'API')
 
 const statusLabels: Record<string, string> = {
   SUCCEEDED: '成功 SUCCEEDED',
@@ -150,6 +208,74 @@ function useSuggestedImageRepository() {
   imageRepository.value = current ? suggestedImageRepository(current.repositoryUrl, current.repositoryProvider) : ''
 }
 
+function resetEnvironmentDraft(value: ApplicationEnvironment) {
+  environmentDraft.value = value.variables.map((item: ApplicationEnvironmentVariable) => ({
+    key: item.key,
+    value: item.secret ? '' : (item.value || ''),
+    secret: item.secret,
+    description: item.description || '',
+  }))
+}
+
+function addEnvironmentVariable() {
+  environmentDraft.value.push({ key: '', value: '', secret: false, description: '' })
+  environmentOpen.value = true
+}
+
+function applyEnvironmentTemplate(templateId: string) {
+  const template = environmentTemplates.find((item) => item.id === templateId)
+  if (!template) return
+  const keys = new Set(environmentDraft.value.map((item) => item.key.trim()))
+  for (const item of template.variables) {
+    if (keys.has(item.key)) continue
+    environmentDraft.value.push({ ...item })
+    keys.add(item.key)
+  }
+  environmentOpen.value = true
+}
+
+async function saveEnvironment() {
+  if (!selectedId.value || !environment.value || environmentValidation.value || !environmentDiff.value.total) return
+  environmentSaving.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const saved = await cicdApi.saveEnvironment(selectedId.value, {
+      expectedRevision: environment.value.revision,
+      variables: environmentDraft.value.map((item) => {
+        const key = item.key.trim()
+        return {
+          key,
+          value: environmentOriginal.value.get(key)?.secret && item.secret && !item.value ? null : item.value,
+          secret: item.secret,
+          description: item.description.trim(),
+        }
+      }),
+    })
+    environment.value = saved
+    resetEnvironmentDraft(saved)
+    successMessage.value = `环境变量 Revision ${saved.revision} 已加密保存，发布前将检查同步状态。`
+  } catch (error) {
+    errorMessage.value = apiErrorMessage(error, '无法保存环境变量 Environment')
+  } finally { environmentSaving.value = false }
+}
+
+async function syncEnvironment() {
+  if (!selectedId.value || !environmentSyncSupported.value || environmentDiff.value.total) return
+  environmentSyncing.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    const synced = await cicdApi.syncEnvironment(selectedId.value)
+    environment.value = synced
+    resetEnvironmentDraft(synced)
+    if (synced.syncStatus === 'SYNCED') successMessage.value = `Revision ${synced.revision} 已安全同步到 Coolify。`
+    else errorMessage.value = synced.syncError || '环境变量同步失败'
+  } catch (error) {
+    errorMessage.value = apiErrorMessage(error, '无法同步环境变量 Environment sync')
+  } finally { environmentSyncing.value = false }
+}
+
 async function initialize() {
   loading.value = true
   errorMessage.value = ''
@@ -173,11 +299,12 @@ async function loadApplication(silent = false) {
   // explicitly switches/reloads the application.
   if (!silent) revealedSecret.value = ''
   try {
-    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication] = await Promise.all([
+    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult] = await Promise.all([
       cicdApi.configuration(selectedId.value).catch(() => null),
       cicdApi.runs(selectedId.value),
       cicdApi.deployments(selectedId.value),
       applicationApi.get(selectedId.value),
+      cicdApi.environment(selectedId.value),
     ])
     configuration.value = configurationResult
     if (!silent) {
@@ -186,6 +313,11 @@ async function loadApplication(silent = false) {
     }
     runs.value = pipelineRuns
     deployments.value = deploymentHistory
+    environment.value = environmentResult
+    if (!silent) {
+      resetEnvironmentDraft(environmentResult)
+      environmentOpen.value = environmentResult.variables.length > 0
+    }
     activity.value = await cicdApi.activity()
     const applicationIndex = applications.value.findIndex((item) => item.id === runtimeApplication.id)
     if (applicationIndex >= 0) applications.value[applicationIndex] = runtimeApplication
@@ -270,6 +402,12 @@ function downloadWorkflow() {
 
 function formatTime(value: string | null) {
   return value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '—'
+}
+
+function environmentStatusLabel(status: ApplicationEnvironment['syncStatus'] | undefined) {
+  return ({
+    NOT_CONFIGURED: '未配置', DIRTY: '有待同步变更 DIRTY', SYNCED: '已同步 SYNCED', FAILED: '同步失败 FAILED',
+  } as Record<string, string>)[status || 'NOT_CONFIGURED'] || status
 }
 
 function tone(value: string) {
@@ -383,6 +521,48 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         </div>
       </section>
 
+      <section v-if="environment" class="cicd-environment-panel" :class="{ expanded: environmentOpen }">
+        <header>
+          <div class="environment-heading"><span>运行配置 · RUNTIME ENVIRONMENT</span><strong>环境变量与 Secrets</strong><p>加密保存、先看差异，再安全同步到部署平台。</p></div>
+          <div class="environment-header-actions"><span class="environment-sync-state" :class="environment.syncStatus.toLowerCase()"><i />{{ environmentStatusLabel(environment.syncStatus) }}</span><button type="button" @click="environmentOpen = !environmentOpen">{{ environmentOpen ? '收起' : `管理 ${environment.variables.length} 个变量` }}</button></div>
+        </header>
+        <div v-if="environmentOpen" class="environment-body">
+          <div class="environment-templates">
+            <div><strong>从模板添加 Add template</strong><small>只添加尚不存在的 Key，不覆盖当前值。</small></div>
+            <button v-for="template in environmentTemplates" :key="template.id" type="button" @click="applyEnvironmentTemplate(template.id)"><span>＋</span><strong>{{ template.name }}</strong><small>{{ template.detail }}</small></button>
+            <button class="blank-variable" type="button" @click="addEnvironmentVariable"><span>＋</span><strong>空白变量</strong><small>Custom key</small></button>
+          </div>
+
+          <div class="environment-editor">
+            <header><div><strong>期望配置 Desired state</strong><small>Secret 留空表示保留原值；新 Secret 必须填写。</small></div><b>REVISION {{ environment.revision }}</b></header>
+            <div v-if="environmentDraft.length" class="environment-rows">
+              <div v-for="(item, index) in environmentDraft" :key="`${index}-${item.key}`" class="environment-row">
+                <label class="environment-key"><span>KEY</span><input v-model.trim="item.key" maxlength="128" spellcheck="false" placeholder="VARIABLE_NAME" /></label>
+                <label class="environment-value"><span>{{ item.secret ? 'SECRET VALUE' : 'VALUE' }}</span><input v-model="item.value" :type="item.secret ? 'password' : 'text'" maxlength="8000" autocomplete="new-password" :placeholder="environmentOriginal.get(item.key)?.secret ? '••••••••  留空保留原值' : '变量值'" /></label>
+                <label class="environment-description"><span>说明 DESCRIPTION</span><input v-model.trim="item.description" maxlength="255" placeholder="这个变量用于什么" /></label>
+                <label class="secret-toggle"><input v-model="item.secret" type="checkbox" /><span>Secret</span></label>
+                <button class="remove-variable" type="button" title="删除变量" @click="environmentDraft.splice(index, 1)">×</button>
+              </div>
+            </div>
+            <button v-else class="environment-empty" type="button" @click="addEnvironmentVariable"><span>＋</span><strong>添加第一个环境变量</strong><small>也可以从上方模板开始。</small></button>
+          </div>
+
+          <div class="environment-review">
+            <div class="diff-summary"><span>变更预览 · DIFF PREVIEW</span><strong>{{ environmentDiff.total ? `${environmentDiff.total} 项待保存` : '没有未保存变更' }}</strong><small>保存使用乐观锁，旧页面不会覆盖新 Revision。</small></div>
+            <div v-if="environmentDiff.total" class="diff-groups">
+              <p v-if="environmentDiff.added.length"><b class="add">＋新增</b><code v-for="key in environmentDiff.added" :key="key">{{ key }}</code></p>
+              <p v-if="environmentDiff.changed.length"><b class="change">±修改</b><code v-for="key in environmentDiff.changed" :key="key">{{ key }}</code></p>
+              <p v-if="environmentDiff.removed.length"><b class="remove">－删除</b><code v-for="key in environmentDiff.removed" :key="key">{{ key }}</code></p>
+            </div>
+            <p v-if="environmentValidation" class="environment-validation">{{ environmentValidation }}</p>
+            <p v-if="environment.syncError" class="environment-validation">{{ environment.syncError }}</p>
+            <p v-if="!environmentSyncSupported" class="provider-safety-note"><strong>Provider safety</strong>当前 {{ configuration?.deploymentProvider || 'Provider' }} 配置不支持安全增量同步。变量仍会加密保存在 DevPilot，但发布会在同步前停止，防止覆盖平台中未知的 Secrets。</p>
+            <p v-else class="provider-ready-note"><strong>Coolify safe sync</strong>保存后可立即同步；若暂不操作，下一次发布也会在更新镜像前自动同步。</p>
+            <footer><button v-if="canConfigure" type="button" :disabled="environmentSaving || !!environmentValidation || !environmentDiff.total" @click="saveEnvironment">{{ environmentSaving ? '加密保存中…' : '保存变更 Save revision' }}</button><button v-if="canConfigure && environmentSyncSupported" class="sync-environment" type="button" :disabled="environmentSyncing || !!environmentDiff.total || environment.syncStatus === 'SYNCED'" @click="syncEnvironment">{{ environmentSyncing ? '同步中…' : '同步到 Coolify' }}</button><small v-if="!canConfigure">需要管理员角色才能修改。</small></footer>
+          </div>
+        </div>
+      </section>
+
       <div v-if="configurationExpanded" class="cicd-layout">
         <section class="cicd-panel">
           <header><div><strong>流水线契约 Pipeline contract</strong><small>代码仓库、受保护分支与部署适配器</small></div><span :class="{ live: configuration }"><i />{{ configuration ? '已配置 Configured' : '未配置' }}</span></header>
@@ -458,9 +638,18 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 .pipeline-panel{margin-top:16px}.pipeline-heading{gap:16px}.pipeline-tools{display:flex;align-items:center;gap:8px}.pipeline-tools input,.pipeline-tools select{height:36px;border:1px solid var(--line);border-radius:8px;outline:0;padding:0 10px;color:var(--text);background:rgba(15,23,42,.22);font-size:11px}.pipeline-tools input{width:190px}.pipeline-panel>header>button,.pipeline-tools button{height:36px;font-size:11px}.pipeline-state{border-radius:6px;padding:5px 8px;font-size:9px;white-space:nowrap}.pipeline-table td,.deployment-table td{font-size:11px}.pipeline-table td:first-child code{font-size:10px}.image-uri{max-width:310px;font-size:10px}.pipeline-table td small,.deployment-table td small{font-size:10px}.deployment-log summary{font-size:10px}.deployment-log pre{font:10px/1.6 ui-monospace,monospace}.rollback-action{height:34px;padding:0 11px;font-size:10px}.empty-panel p{font-size:12px}
 .activity-panel{overflow:hidden;margin:0 0 18px;border:1px solid var(--line);border-radius:15px;background:var(--panel);box-shadow:0 8px 28px rgba(38,57,84,.04)}.activity-panel>header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}.activity-panel>header div>span,.activity-panel>header strong,.activity-panel>header small{display:block}.activity-panel>header div>span{color:#76a7ff;font-size:9px;font-weight:850;letter-spacing:.13em}.activity-panel>header strong{margin-top:6px;font-size:14px}.activity-panel>header small{margin-top:4px;color:var(--muted);font-size:10px}.activity-live{display:flex!important;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.18);border-radius:20px;padding:5px 8px;color:#22c55e;font-size:9px!important;font-weight:800}.activity-live i{width:6px;height:6px;border-radius:50%;background:currentColor}.activity-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line)}.activity-list>a{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:12px;min-width:0;padding:15px 18px;color:inherit;background:var(--panel-solid);text-decoration:none}.activity-list>a:hover{background:rgba(59,130,246,.035)}.activity-kind{border:1px solid rgba(59,130,246,.18);border-radius:7px;padding:5px 7px;color:#60a5fa;background:rgba(59,130,246,.06);font-size:9px;font-weight:800}.activity-kind.rollback{border-color:rgba(245,158,11,.2);color:#f59e0b;background:rgba(245,158,11,.06)}.activity-list>a>div{min-width:0}.activity-list strong,.activity-list code,.activity-list p{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-list strong{font-size:12px}.activity-list strong small{display:inline;margin-left:5px;color:var(--muted);font-size:9px}.activity-list code{margin-top:6px;color:#8f7dd3;font-size:10px}.activity-list p{margin:5px 0 0;color:var(--muted);font-size:9px}.activity-list aside{display:grid;justify-items:end;gap:8px}.activity-list time{color:var(--muted);font-size:8px;white-space:nowrap}
 .onboarding-panel{overflow:hidden;margin-top:16px;border:1px solid rgba(59,130,246,.2);border-radius:16px;background:linear-gradient(135deg,rgba(239,246,255,.06),var(--panel) 42%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.onboarding-panel>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 22px}.onboarding-title>span,.onboarding-title>strong{display:block}.onboarding-title>span,.section-kicker{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.onboarding-title>strong{margin-top:7px;font-size:16px}.onboarding-title>p{margin:5px 0 0;color:var(--muted);font-size:11px}.onboarding-panel>header>button{height:38px;flex:0 0 auto;border:0;border-radius:9px;padding:0 14px;color:#fff;background:#2563eb;font-size:11px;font-weight:800}.onboarding-panel.expanded>header{border-bottom:1px solid var(--line)}.onboarding-body{padding:20px}.onboarding-steps{display:grid;grid-template-columns:repeat(3,1fr);margin:0 0 18px;padding:0;list-style:none}.onboarding-steps li{position:relative;display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;gap:10px}.onboarding-steps li:not(:last-child)::after{content:'';position:absolute;top:15px;right:14px;left:178px;height:1px;background:var(--line)}.onboarding-steps li>span{display:grid;width:30px;height:30px;place-items:center;border:1px solid var(--line);border-radius:50%;color:#718096;background:var(--panel-solid);font-size:10px;font-weight:850}.onboarding-steps li.done>span{border-color:rgba(34,197,94,.25);color:#16803d;background:rgba(34,197,94,.08)}.onboarding-steps strong,.onboarding-steps small{display:block;overflow:hidden;max-width:250px;text-overflow:ellipsis;white-space:nowrap}.onboarding-steps strong{font-size:11px}.onboarding-steps small{margin-top:4px;color:var(--muted);font-size:9px}.onboarding-grid{display:grid;grid-template-columns:minmax(310px,.72fr) minmax(0,1.28fr);overflow:hidden;border:1px solid var(--line);border-radius:13px;background:var(--panel-solid)}.onboarding-config{padding:20px;border-right:1px solid var(--line)}.config-section{padding:0 0 19px}.config-section+.config-section{padding-top:19px;border-top:1px solid var(--line)}.config-section>strong{display:block;margin:7px 0 11px;font-size:13px}.config-section>small{display:block;margin-top:9px;color:var(--muted);font-size:10px;line-height:1.55}.config-section code{color:#536a8c;font:10px ui-monospace,monospace}.runtime-options{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.runtime-options button{height:34px;border:1px solid var(--line);border-radius:8px;color:#5f7088;background:transparent;font-size:10px;font-weight:800}.runtime-options button.active{border-color:#6b9be9;color:#1d5fbe;background:rgba(59,130,246,.08);box-shadow:inset 0 0 0 1px rgba(59,130,246,.08)}.config-section label{display:grid;grid-template-columns:minmax(0,1fr) auto}.config-section label input{min-width:0;height:40px;border:1px solid var(--line);border-radius:9px 0 0 9px;outline:0;padding:0 11px;color:var(--text);background:var(--panel);font:10px ui-monospace,monospace}.config-section label input:focus{border-color:#78a5ed}.config-section label button{border:1px solid #78a5ed;border-left:0;border-radius:0 9px 9px 0;padding:0 11px;color:#286ac2;background:rgba(59,130,246,.07);font-size:10px;font-weight:750}.config-section .input-error{color:#dc5b5b}.secrets-section ul{display:grid;gap:7px;margin:0;padding:0;list-style:none}.secrets-section li{display:grid;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:rgba(148,163,184,.035)}.secrets-section li code{color:#286ac2;font-weight:750}.secrets-section li span{overflow:hidden;color:var(--muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.secrets-section .local-warning{margin:10px 0 0;border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px;color:#a56509;background:rgba(245,158,11,.06);font-size:10px;line-height:1.55}.generator-notes{display:grid;gap:6px}.generator-notes p{margin:0;color:#59708e;font-size:10px;line-height:1.5}.workflow-preview{display:grid;min-width:0;grid-template-rows:auto minmax(360px,1fr) auto;background:#101827}.workflow-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.08)}.workflow-preview>header span,.workflow-preview>header strong{display:block}.workflow-preview>header span{color:#7f91aa;font-size:8px}.workflow-preview>header strong{margin-top:4px;color:#d9e4f2;font:10px ui-monospace,monospace}.workflow-preview>header>div:last-child{display:flex;gap:6px}.workflow-preview button{height:31px;border:1px solid rgba(255,255,255,.13);border-radius:7px;padding:0 10px;color:#c2d0e2;background:rgba(255,255,255,.04);font-size:9px;font-weight:750}.workflow-preview button.download{border-color:#3878d1;color:#fff;background:#286ac2}.workflow-preview button:disabled{cursor:not-allowed;opacity:.4}.workflow-preview pre{max-height:620px;overflow:auto;margin:0;padding:17px}.workflow-preview pre code{color:#c5d1df;font:10px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}.workflow-empty{display:grid;place-items:center;padding:40px;color:#718096;font-size:11px}.workflow-preview>footer{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:12px 15px;border-top:1px solid rgba(255,255,255,.08);color:#8ea0b8}.workflow-preview>footer span{color:#72a4ef;font-size:9px;font-weight:850}.workflow-preview>footer p{margin:0;font-size:9px;line-height:1.5}
+.cicd-environment-panel{overflow:hidden;margin-top:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 10px 32px rgba(38,57,84,.04)}
+.cicd-environment-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 22px}
+.cicd-environment-panel.expanded>header{border-bottom:1px solid var(--line)}
+.environment-heading>span,.environment-heading>strong{display:block}.environment-heading>span{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.environment-heading>strong{margin-top:7px;font-size:16px}.environment-heading>p{margin:5px 0 0;color:var(--muted);font-size:11px}
+.environment-header-actions{display:flex;align-items:center;gap:9px}.environment-header-actions>button{height:38px;border:1px solid var(--line);border-radius:9px;padding:0 13px;color:#41658f;background:transparent;font-size:10px;font-weight:750}.environment-sync-state{display:flex;align-items:center;gap:6px;border-radius:20px;padding:6px 9px;color:#718096;background:rgba(100,116,139,.08);font-size:9px;font-weight:800}.environment-sync-state i{width:6px;height:6px;border-radius:50%;background:currentColor}.environment-sync-state.synced{color:#16803d;background:rgba(34,197,94,.08)}.environment-sync-state.dirty{color:#a56509;background:rgba(245,158,11,.09)}.environment-sync-state.failed{color:#c24141;background:rgba(239,68,68,.08)}
+.environment-body{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.65fr);gap:16px;padding:20px}.environment-templates{display:grid;grid-column:1/-1;grid-template-columns:minmax(190px,1fr) repeat(4,minmax(120px,.62fr));gap:8px}.environment-templates>div{align-self:center}.environment-templates>div strong,.environment-templates>div small{display:block}.environment-templates>div strong{font-size:12px}.environment-templates>div small{margin-top:4px;color:var(--muted);font-size:9px}.environment-templates>button{display:grid;grid-template-columns:22px 1fr;grid-template-rows:auto auto;column-gap:8px;min-height:52px;align-items:center;border:1px solid var(--line);border-radius:9px;padding:8px 10px;text-align:left;color:var(--text);background:var(--panel-solid)}.environment-templates>button>span{display:grid;grid-row:1/3;width:22px;height:22px;place-items:center;border-radius:7px;color:#286ac2;background:rgba(59,130,246,.08);font-size:13px}.environment-templates>button strong{font-size:10px}.environment-templates>button small{color:var(--muted);font-size:8px}.environment-templates>button:hover{border-color:rgba(59,130,246,.3)}
+.environment-editor,.environment-review{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel-solid)}.environment-editor>header{display:flex;min-height:58px;align-items:center;justify-content:space-between;padding:0 14px;border-bottom:1px solid var(--line)}.environment-editor>header strong,.environment-editor>header small{display:block}.environment-editor>header strong{font-size:12px}.environment-editor>header small{margin-top:4px;color:var(--muted);font-size:9px}.environment-editor>header>b{color:#60748f;font:9px ui-monospace,monospace}.environment-rows{display:grid}.environment-row{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(150px,1.1fr) minmax(130px,1fr) auto 28px;align-items:end;gap:8px;padding:11px 13px;border-bottom:1px solid var(--line)}.environment-row:last-child{border:0}.environment-row label:not(.secret-toggle){display:grid;gap:5px;min-width:0}.environment-row label>span{color:#728197;font-size:8px;font-weight:750}.environment-row input[type='text'],.environment-row input[type='password']{min-width:0;width:100%;height:34px;border:1px solid var(--line);border-radius:7px;outline:0;padding:0 9px;color:var(--text);background:var(--panel);font:10px ui-monospace,monospace}.environment-row input:focus{border-color:#78a5ed}.secret-toggle{display:flex;height:34px;align-items:center;gap:5px;color:#7a899f;font-size:9px}.secret-toggle input{accent-color:#2563eb}.remove-variable{width:28px;height:34px;border:0;border-radius:7px;color:#c65d5d;background:rgba(239,68,68,.06);font-size:15px}.environment-empty{display:grid;width:100%;min-height:130px;place-items:center;align-content:center;gap:5px;border:0;color:var(--muted);background:transparent}.environment-empty>span{font-size:21px}.environment-empty strong{font-size:11px}.environment-empty small{font-size:9px}
+.environment-review{align-self:start;padding:16px}.diff-summary>span,.diff-summary>strong,.diff-summary>small{display:block}.diff-summary>span{color:#6595e7;font-size:8px;font-weight:850;letter-spacing:.12em}.diff-summary>strong{margin-top:7px;font-size:13px}.diff-summary>small{margin-top:5px;color:var(--muted);font-size:9px;line-height:1.5}.diff-groups{display:grid;gap:8px;margin-top:14px}.diff-groups p{display:flex;align-items:flex-start;gap:5px;margin:0;flex-wrap:wrap}.diff-groups b{border-radius:5px;padding:4px 6px;font-size:8px}.diff-groups b.add{color:#16803d;background:rgba(34,197,94,.09)}.diff-groups b.change{color:#a56509;background:rgba(245,158,11,.1)}.diff-groups b.remove{color:#c24141;background:rgba(239,68,68,.08)}.diff-groups code{border:1px solid var(--line);border-radius:5px;padding:4px 6px;color:#536a8c;font:8px ui-monospace,monospace}.environment-validation,.provider-safety-note,.provider-ready-note{margin:13px 0 0;border-radius:8px;padding:10px;font-size:9px;line-height:1.55}.environment-validation{border:1px solid rgba(239,68,68,.2);color:#c24141;background:rgba(239,68,68,.055)}.provider-safety-note{border:1px solid rgba(245,158,11,.22);color:#8d682d;background:rgba(245,158,11,.055)}.provider-ready-note{border:1px solid rgba(34,197,94,.18);color:#3f7451;background:rgba(34,197,94,.05)}.provider-safety-note strong,.provider-ready-note strong{display:block;margin-bottom:4px}.environment-review>footer{display:flex;gap:7px;margin-top:14px;flex-wrap:wrap}.environment-review>footer button{height:36px;border:0;border-radius:8px;padding:0 11px;color:#fff;background:#2563eb;font-size:9px;font-weight:800}.environment-review>footer button.sync-environment{color:#21633a;background:rgba(34,197,94,.13)}.environment-review>footer button:disabled{cursor:not-allowed;opacity:.4}.environment-review>footer small{align-self:center;color:var(--muted);font-size:9px}
 @media(max-width:1100px){.delivery-flow{grid-template-columns:1fr 1fr}.delivery-flow li:nth-child(2){border-right:0}.delivery-flow li:nth-child(-n+2){border-bottom:1px solid var(--line)}.connection-strip{grid-template-columns:1fr 1fr}.connection-strip>div{border:0;border-bottom:1px solid var(--line);padding:12px}.connection-strip>button{margin:12px}.cicd-layout{grid-template-columns:1fr}.activity-list{grid-template-columns:1fr}}
 @media(max-width:1100px){.onboarding-grid{grid-template-columns:1fr}.onboarding-config{border-right:0;border-bottom:1px solid var(--line)}.onboarding-steps li:not(:last-child)::after{display:none}}
-@media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}}
+@media(max-width:1100px){.environment-body{grid-template-columns:1fr}.environment-templates{grid-template-columns:1fr 1fr 1fr}.environment-templates>div{grid-column:1/-1}.environment-row{grid-template-columns:1fr 1fr}.environment-description{grid-column:1/-1}.secret-toggle,.remove-variable{justify-self:start}}
+@media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header,.cicd-environment-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body,.environment-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}.environment-header-actions{width:100%;justify-content:space-between}.environment-templates{grid-template-columns:1fr 1fr}.environment-row{grid-template-columns:1fr}.environment-description{grid-column:auto}.secret-toggle,.remove-variable{justify-self:stretch}.remove-variable{width:100%}}
 :global(:root[data-theme='light']) .cicd-panel,:global(:root[data-theme='light']) .callback-panel,:global(:root[data-theme='light']) .pipeline-panel,:global(:root[data-theme='light']) .connection-strip{box-shadow:0 8px 28px rgba(38,57,84,.045)}
 :global(:root[data-theme='light']) .delivery-overview>header p{color:#5f7088}
 :global(:root[data-theme='light']) .delivery-actions a,:global(:root[data-theme='light']) .connection-strip>button{color:#41658f;background:#fff}

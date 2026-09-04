@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.devpilot.server.cicd.service.DeploymentWebhookClient;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
+import com.devpilot.server.cicd.service.DeploymentWebhookClient.EnvironmentVariable;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +19,8 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
+import java.util.Map;
+import java.util.Set;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,6 +47,8 @@ class CicdIntegrationTests {
     @BeforeEach
     void resetDatabase() {
         jdbcTemplate.update("DELETE FROM audit_log");
+        jdbcTemplate.update("DELETE FROM application_environment_variable");
+        jdbcTemplate.update("DELETE FROM application_environment_state");
         jdbcTemplate.update("DELETE FROM cicd_deployment");
         jdbcTemplate.update("DELETE FROM cicd_pipeline_run");
         jdbcTemplate.update("DELETE FROM cicd_configuration");
@@ -67,6 +72,105 @@ class CicdIntegrationTests {
         jdbcTemplate.update("DELETE FROM auth_refresh_token");
         jdbcTemplate.update("DELETE FROM sys_user_role");
         jdbcTemplate.update("DELETE FROM sys_user");
+    }
+
+    @Test
+    void environmentVariablesAreEncryptedMaskedAndRevisionProtected() throws Exception {
+        Fixture fixture = createApplication();
+        mockMvc.perform(get("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.revision", is(0)))
+                .andExpect(jsonPath("$.data.syncStatus", is("NOT_CONFIGURED")));
+
+        mockMvc.perform(put("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"expectedRevision":0,"variables":[
+                                  {"key":"PUBLIC_URL","value":"https://demo.example.com","secret":false,
+                                   "description":"Public origin"},
+                                  {"key":"API_KEY","value":"top-secret-value","secret":true,
+                                   "description":"Provider token"}]}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.revision", is(1)))
+                .andExpect(jsonPath("$.data.syncStatus", is("DIRTY")))
+                .andExpect(jsonPath("$.data.variables[0].key", is("API_KEY")))
+                .andExpect(jsonPath("$.data.variables[0].value").isEmpty())
+                .andExpect(jsonPath("$.data.variables[0].configured", is(true)))
+                .andExpect(jsonPath("$.data.variables[1].value", is("https://demo.example.com")));
+
+        jdbcTemplate.query("SELECT value_cipher FROM application_environment_variable", result -> {
+            String encrypted = result.getString(1);
+            org.junit.jupiter.api.Assertions.assertTrue(encrypted.startsWith("v1:"));
+            org.junit.jupiter.api.Assertions.assertFalse(encrypted.contains("top-secret-value"));
+            org.junit.jupiter.api.Assertions.assertFalse(encrypted.contains("https://demo.example.com"));
+        });
+        String environmentAudit = jdbcTemplate.queryForObject(
+                "SELECT request_params FROM audit_log WHERE action = 'UPDATE_APPLICATION_ENVIRONMENT'",
+                String.class);
+        org.junit.jupiter.api.Assertions.assertFalse(environmentAudit.contains("top-secret-value"));
+        org.junit.jupiter.api.Assertions.assertFalse(environmentAudit.contains("https://demo.example.com"));
+        org.junit.jupiter.api.Assertions.assertTrue(environmentAudit.contains("[REDACTED]"));
+
+        mockMvc.perform(put("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"expectedRevision":0,"variables":[]}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40950)));
+
+        mockMvc.perform(put("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"expectedRevision":1,"variables":[
+                                  {"key":"API_KEY","value":null,"secret":true,"description":"Provider token"},
+                                  {"key":"PUBLIC_URL","value":"https://new.example.com","secret":false}]}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.revision", is(2)))
+                .andExpect(jsonPath("$.data.variables[0].value").isEmpty())
+                .andExpect(jsonPath("$.data.variables[1].value", is("https://new.example.com")));
+    }
+
+    @Test
+    void dirtyEnvironmentIsSafelySyncedBeforeCoolifyDeployment() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                                 "providerBaseUrl":"https://coolify.example/api/v1","providerApiToken":"provider-token",
+                                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String secret = data(configured).path("oneTimeCallbackSecret").asText();
+        mockMvc.perform(put("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"expectedRevision":0,"variables":[
+                                  {"key":"NODE_ENV","value":"production","secret":false},
+                                  {"key":"API_KEY","value":"secret-value","secret":true}]}
+                                """))
+                .andExpect(status().isOk());
+
+        submitSuccessfulCallback(secret, "run-env", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "ghcr.io/acme/demo:sha-eeeeeeeeeeee");
+
+        verify(deploymentWebhookClient).syncCoolifyEnvironment("https://coolify.example/api/v1", "provider-token", "app_42",
+                Map.of("API_KEY", new EnvironmentVariable("secret-value", true),
+                        "NODE_ENV", new EnvironmentVariable("production", false)), Set.of());
+        verify(deploymentWebhookClient).deploy("COOLIFY", "API", null,
+                "https://coolify.example/api/v1", "provider-token", "app_42",
+                "ghcr.io/acme/demo:sha-eeeeeeeeeeee");
+        mockMvc.perform(get("/api/cicd/applications/{id}/environment", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.syncStatus", is("SYNCED")))
+                .andExpect(jsonPath("$.data.syncedRevision", is(1)));
     }
 
     @Test

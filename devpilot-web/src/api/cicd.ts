@@ -101,6 +101,30 @@ export interface CicdActivity {
   updatedAt: string
 }
 
+export interface ApplicationEnvironmentVariable {
+  key: string
+  value: string | null
+  secret: boolean
+  configured: boolean
+  description: string | null
+}
+
+export interface ApplicationEnvironment {
+  applicationId: string
+  revision: number
+  syncedRevision: number | null
+  variables: ApplicationEnvironmentVariable[]
+  syncStatus: 'NOT_CONFIGURED' | 'DIRTY' | 'SYNCED' | 'FAILED'
+  syncError: string | null
+  providerSyncedAt: string | null
+  updatedAt: string | null
+}
+
+export interface SaveApplicationEnvironmentPayload {
+  expectedRevision: number
+  variables: Array<{ key: string; value: string | null; secret: boolean; description: string }>
+}
+
 export const cicdApi = {
   async configuration(applicationId: string) {
     const response = await apiClient.get<ApiResponse<CicdConfiguration>>(`/cicd/configurations/${applicationId}`)
@@ -124,6 +148,18 @@ export const cicdApi = {
   },
   async rollback(applicationId: string, deploymentId: string) {
     const response = await apiClient.post<ApiResponse<CicdDeployment>>(`/cicd/applications/${applicationId}/deployments/${deploymentId}/rollback`)
+    return response.data.data
+  },
+  async environment(applicationId: string) {
+    const response = await apiClient.get<ApiResponse<ApplicationEnvironment>>(`/cicd/applications/${applicationId}/environment`)
+    return response.data.data
+  },
+  async saveEnvironment(applicationId: string, payload: SaveApplicationEnvironmentPayload) {
+    const response = await apiClient.put<ApiResponse<ApplicationEnvironment>>(`/cicd/applications/${applicationId}/environment`, payload)
+    return response.data.data
+  },
+  async syncEnvironment(applicationId: string) {
+    const response = await apiClient.post<ApiResponse<ApplicationEnvironment>>(`/cicd/applications/${applicationId}/environment/sync`)
     return response.data.data
   },
 }

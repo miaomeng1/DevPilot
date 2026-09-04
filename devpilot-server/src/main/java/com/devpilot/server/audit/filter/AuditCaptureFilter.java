@@ -128,6 +128,9 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
 
     private static boolean isSecret(String field, String path) {
         String lower = field.toLowerCase();
+        if (path.matches("/api/cicd/applications/\\d+/environment(?:/sync)?") && lower.equals("value")) {
+            return true;
+        }
         return lower.contains("password") || (lower.contains("token") && !lower.contains("ttl")) || lower.contains("secret")
                 || (path.contains("webhook") && lower.equals("url"));
     }
@@ -215,6 +218,10 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
         if (path.matches("/api/users/\\d+") && "DELETE".equals(method)) return "DELETE_USER";
         if (path.equals("/api/settings")) return "UPDATE_SETTINGS";
         if (path.startsWith("/api/cicd/configurations/")) return "UPDATE_CICD_CONFIGURATION";
+        if (path.matches("/api/cicd/applications/\\d+/environment") && "PUT".equals(method)) {
+            return "UPDATE_APPLICATION_ENVIRONMENT";
+        }
+        if (path.matches("/api/cicd/applications/\\d+/environment/sync")) return "SYNC_APPLICATION_ENVIRONMENT";
         if (path.matches("/api/cicd/applications/\\d+/deployments/\\d+/rollback")) return "ROLLBACK_DEPLOYMENT";
         return method + "_API";
     }

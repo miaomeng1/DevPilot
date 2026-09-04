@@ -10,7 +10,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -76,6 +78,62 @@ public class DeploymentWebhookClient {
             return null;
         }
         return extractLogs(response);
+    }
+
+    public void syncCoolifyEnvironment(String baseUrl, String apiToken, String resourceId,
+                                       Map<String, EnvironmentVariable> desired, Set<String> previouslyManagedKeys) {
+        String root = stripApiSuffix(baseUrl);
+        String endpoint = root + "/api/v1/applications/" + urlEncode(resourceId) + "/envs";
+        HttpRequest listRequest = HttpRequest.newBuilder(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(15))
+                .header("Authorization", "Bearer " + apiToken)
+                .header("User-Agent", "DevPilot/0.2 coolify-environment-sync")
+                .GET().build();
+        Map<String, String> current = new LinkedHashMap<>();
+        try {
+            JsonNode response = objectMapper.readTree(send("COOLIFY", listRequest));
+            if (!response.isArray()) throw new IllegalStateException("COOLIFY env API returned an invalid response");
+            for (JsonNode item : response) {
+                String key = textOrNull(item, "key");
+                String uuid = textOrNull(item, "uuid");
+                if (key != null && uuid != null) current.put(key, uuid);
+            }
+        } catch (IllegalStateException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to parse COOLIFY environment variables", exception);
+        }
+
+        for (Map.Entry<String, EnvironmentVariable> entry : desired.entrySet()) {
+            EnvironmentVariable variable = entry.getValue();
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("key", entry.getKey());
+            body.put("value", variable.value());
+            body.put("is_preview", false);
+            body.put("is_literal", true);
+            body.put("is_multiline", variable.value().contains("\n"));
+            body.put("is_shown_once", variable.secret());
+            HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Authorization", "Bearer " + apiToken)
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "DevPilot/0.2 coolify-environment-sync")
+                    .method(current.containsKey(entry.getKey()) ? "PATCH" : "POST",
+                            HttpRequest.BodyPublishers.ofString(json(body), StandardCharsets.UTF_8))
+                    .build();
+            send("COOLIFY", request);
+        }
+        for (String removedKey : previouslyManagedKeys) {
+            if (desired.containsKey(removedKey)) continue;
+            String uuid = current.get(removedKey);
+            if (uuid == null) continue;
+            HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint + "/" + urlEncode(uuid)))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Authorization", "Bearer " + apiToken)
+                    .header("User-Agent", "DevPilot/0.2 coolify-environment-sync")
+                    .DELETE().build();
+            send("COOLIFY", request);
+        }
     }
 
     public DeploymentState fetchDeploymentState(String provider, String baseUrl, String apiToken,
@@ -225,7 +283,7 @@ public class DeploymentWebhookClient {
         }
     }
 
-    private String json(Map<String, String> body) {
+    private String json(Object body) {
         try {
             return objectMapper.writeValueAsString(body);
         } catch (Exception exception) {
@@ -281,4 +339,6 @@ public class DeploymentWebhookClient {
     public enum DeploymentState {
         PENDING, SUCCEEDED, FAILED, UNKNOWN
     }
+
+    public record EnvironmentVariable(String value, boolean secret) { }
 }

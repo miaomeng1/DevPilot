@@ -5,6 +5,9 @@ import com.devpilot.server.cicd.dto.CicdConfigurationResponse;
 import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
 import com.devpilot.server.cicd.dto.PipelineRunResponse;
+import com.devpilot.server.cicd.dto.ApplicationEnvironmentResponse;
+import com.devpilot.server.cicd.dto.SaveApplicationEnvironmentRequest;
+import com.devpilot.server.cicd.service.ApplicationEnvironmentService;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
 import com.devpilot.server.cicd.service.CicdService;
 import com.devpilot.server.common.ApiResponse;
@@ -30,6 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class CicdController {
     private final CicdService cicdService;
     private final CicdDeploymentService deploymentService;
+    private final ApplicationEnvironmentService environmentService;
 
     @GetMapping("/configurations/{applicationId}")
     public ApiResponse<CicdConfigurationResponse> configuration(@PathVariable Long applicationId) {
@@ -53,6 +57,26 @@ public class CicdController {
     @GetMapping("/applications/{applicationId}/deployments")
     public ApiResponse<List<CicdDeploymentResponse>> deployments(@PathVariable Long applicationId) {
         return ApiResponse.success(deploymentService.list(applicationId));
+    }
+
+    @GetMapping("/applications/{applicationId}/environment")
+    public ApiResponse<ApplicationEnvironmentResponse> environment(@PathVariable Long applicationId) {
+        return ApiResponse.success(environmentService.get(applicationId));
+    }
+
+    @PutMapping("/applications/{applicationId}/environment")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<ApplicationEnvironmentResponse> saveEnvironment(
+            @PathVariable Long applicationId,
+            @Valid @RequestBody SaveApplicationEnvironmentRequest request,
+            @AuthenticationPrincipal DevPilotPrincipal principal) {
+        return ApiResponse.success(environmentService.save(applicationId, request, principal));
+    }
+
+    @PostMapping("/applications/{applicationId}/environment/sync")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<ApplicationEnvironmentResponse> syncEnvironment(@PathVariable Long applicationId) {
+        return ApiResponse.success(environmentService.sync(applicationId));
     }
 
     @GetMapping("/activity")

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.devpilot.server.cicd.service.DeploymentWebhookClient;
 import com.devpilot.server.cicd.service.DeploymentWebhookClient.DeploymentState;
+import com.devpilot.server.cicd.service.DeploymentWebhookClient.EnvironmentVariable;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -12,6 +13,9 @@ import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -83,6 +87,29 @@ class DeploymentWebhookClientTests {
         assertEquals("/api/deployment.all?applicationId=app-42", requests.get(5).path());
     }
 
+    @Test
+    void coolifyEnvironmentSyncUpsertsDesiredKeysAndDeletesOnlyPreviouslyManagedKeys() throws Exception {
+        DeploymentWebhookClient client = new DeploymentWebhookClient(objectMapper);
+        Map<String, EnvironmentVariable> desired = new LinkedHashMap<>();
+        desired.put("KEEP", new EnvironmentVariable("changed", true));
+        desired.put("NEW_KEY", new EnvironmentVariable("line1\nline2", false));
+
+        client.syncCoolifyEnvironment(baseUrl, "coolify-token", "app_42", desired, Set.of("KEEP", "OLD_KEY"));
+
+        assertEquals(4, requests.size());
+        assertEquals("GET", requests.get(0).method());
+        assertEquals("PATCH", requests.get(1).method());
+        assertEquals("POST", requests.get(2).method());
+        assertEquals("DELETE", requests.get(3).method());
+        assertEquals("/api/v1/applications/app_42/envs/old-uuid", requests.get(3).path());
+        JsonNode updated = objectMapper.readTree(requests.get(1).body());
+        assertEquals("KEEP", updated.path("key").asText());
+        assertTrue(updated.path("is_shown_once").asBoolean());
+        JsonNode created = objectMapper.readTree(requests.get(2).body());
+        assertEquals("NEW_KEY", created.path("key").asText());
+        assertTrue(created.path("is_multiline").asBoolean());
+    }
+
     private void handle(HttpExchange exchange) {
         try (exchange) {
             String path = exchange.getRequestURI().toString();
@@ -90,7 +117,11 @@ class DeploymentWebhookClientTests {
             requests.add(new CapturedRequest(exchange.getRequestMethod(), path, body,
                     exchange.getRequestHeaders().getFirst("Authorization"),
                     exchange.getRequestHeaders().getFirst("x-api-key")));
-            String response = path.startsWith("/api/v1/deployments/")
+            String response = path.equals("/api/v1/applications/app_42/envs")
+                    && "GET".equals(exchange.getRequestMethod())
+                    ? "[{\"key\":\"KEEP\",\"uuid\":\"keep-uuid\"},{\"key\":\"OLD_KEY\",\"uuid\":\"old-uuid\"},"
+                    + "{\"key\":\"UNMANAGED\",\"uuid\":\"safe-uuid\"}]"
+                    : path.startsWith("/api/v1/deployments/")
                     ? "{\"logs\":\"coolify build output\"}"
                     : path.startsWith("/api/v1/deploy")
                     ? "{\"deployments\":[{\"deployment_uuid\":\"coolify-deploy-1\"}]}"
