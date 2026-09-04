@@ -4,6 +4,7 @@ import { applicationApi, type Application } from '@/api/applications'
 import { cicdApi, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
 
 const auth = useAuthStore()
 const applications = ref<Application[]>([])
@@ -19,6 +20,10 @@ const errorMessage = ref('')
 const successMessage = ref('')
 const revealedSecret = ref('')
 const configurationExpanded = ref(false)
+const onboardingOpen = ref(false)
+const runtimePreset = ref<RuntimePreset>('NODE')
+const runtimePresets: RuntimePreset[] = ['NODE', 'JAVA', 'GO', 'DOCKER']
+const imageRepository = ref('')
 const runFilter = ref('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
@@ -80,6 +85,30 @@ const releaseGuidance = computed(() => {
   if (['TRIGGERED', 'VERIFYING', 'TRIGGERING'].includes(run.deployStatus)) return '发布正在执行，DevPilot 会等待 Provider 完成并使用新的 Agent 探测结果验证。'
   return '构建结果已收到；生产部署需要 CI 平台审批或手动运行 Production workflow。'
 })
+const imageRepositoryError = computed(() => {
+  const value = imageRepository.value.trim()
+  if (!value) return '请填写镜像仓库 Image repository'
+  if (value !== value.toLowerCase()) return '镜像仓库请使用小写字符'
+  if (!/^(?:[a-z0-9]+(?:[._:-][a-z0-9]+)*\/)+(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)+$/.test(value)) return '格式示例：ghcr.io/owner/repository'
+  return ''
+})
+const callbackAbsoluteUrl = computed(() => {
+  if (!configuration.value) return ''
+  try { return new URL(configuration.value.callbackUrl, window.location.origin).toString() }
+  catch { return configuration.value.callbackUrl }
+})
+const generatedWorkflow = computed(() => {
+  if (!configuration.value || imageRepositoryError.value) return null
+  return generateWorkflow({
+    provider: configuration.value.repositoryProvider,
+    runtime: runtimePreset.value,
+    branch: configuration.value.branchName,
+    imageRepository: imageRepository.value.trim(),
+    callbackUrl: callbackAbsoluteUrl.value,
+    applicationCode: configuration.value.applicationCode,
+  })
+})
+const callbackIsLocal = computed(() => /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b/.test(callbackAbsoluteUrl.value))
 
 const statusLabels: Record<string, string> = {
   SUCCEEDED: '成功 SUCCEEDED',
@@ -104,6 +133,21 @@ const statusLabels: Record<string, string> = {
 
 function statusLabel(value: string) {
   return statusLabels[value] || value
+}
+
+function suggestedImageRepository(repositoryUrl: string, provider: string) {
+  try {
+    const url = new URL(repositoryUrl)
+    const slug = url.pathname.replace(/^\/+|\/?\.git\/?$/g, '').replace(/[^a-zA-Z0-9._/-]/g, '').toLowerCase()
+    if (!slug) return ''
+    if (provider === 'GITLAB') return `registry.gitlab.com/${slug}`
+    return `ghcr.io/${slug}`
+  } catch { return '' }
+}
+
+function useSuggestedImageRepository() {
+  const current = configuration.value
+  imageRepository.value = current ? suggestedImageRepository(current.repositoryUrl, current.repositoryProvider) : ''
 }
 
 async function initialize() {
@@ -136,7 +180,10 @@ async function loadApplication(silent = false) {
       applicationApi.get(selectedId.value),
     ])
     configuration.value = configurationResult
-    if (!silent) configurationExpanded.value = !configurationResult
+    if (!silent) {
+      configurationExpanded.value = !configurationResult
+      imageRepository.value = configurationResult ? suggestedImageRepository(configurationResult.repositoryUrl, configurationResult.repositoryProvider) : ''
+    }
     runs.value = pipelineRuns
     deployments.value = deploymentHistory
     activity.value = await cicdApi.activity()
@@ -183,6 +230,8 @@ async function save() {
     form.rotateCallbackSecret = false
     successMessage.value = 'CI/CD 配置已保存。Provider 凭据与回调密钥均已加密存储。'
     configurationExpanded.value = false
+    onboardingOpen.value = true
+    imageRepository.value = suggestedImageRepository(saved.repositoryUrl, saved.repositoryProvider)
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法保存 CI/CD 配置 Configuration')
   } finally { saving.value = false }
@@ -205,6 +254,18 @@ async function rollback(deployment: CicdDeployment) {
 async function copy(value: string) {
   await navigator.clipboard.writeText(value)
   successMessage.value = '已复制 Copied to clipboard.'
+}
+
+function downloadWorkflow() {
+  const workflow = generatedWorkflow.value
+  if (!workflow) return
+  const url = URL.createObjectURL(new Blob([workflow.content], { type: 'text/yaml;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = workflow.fileName.split('/').pop() || 'devpilot.yml'
+  link.click()
+  URL.revokeObjectURL(url)
+  successMessage.value = `已下载 ${link.download}，请放入仓库路径 ${workflow.fileName}`
 }
 
 function formatTime(value: string | null) {
@@ -267,6 +328,59 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         <div><span>安全策略 Policy</span><strong>{{ configuration.productionApproval ? '生产审批开启' : '无需生产审批' }}</strong><small>{{ configuration.autoRollback ? '自动回滚已开启' : '自动回滚已关闭' }}</small></div>
         <div class="drift-state" :class="imageDrift.state"><span>运行一致性 Runtime drift</span><strong>{{ imageDrift.label }}</strong><small :title="imageDrift.detail">{{ imageDrift.detail }}</small></div>
         <button type="button" @click="configurationExpanded = true">编辑配置</button>
+      </section>
+
+      <section v-if="configuration" class="onboarding-panel" :class="{ expanded: onboardingOpen }">
+        <header>
+          <div class="onboarding-title"><span>仓库接入向导 · REPOSITORY ONBOARDING</span><strong>生成一条真正可执行的交付流水线</strong><p>测试、安全扫描、构建不可变镜像，再把签名发布凭证交给 DevPilot。</p></div>
+          <button type="button" @click="onboardingOpen = !onboardingOpen">{{ onboardingOpen ? '收起向导' : '开始接入 Setup' }}</button>
+        </header>
+        <div v-if="onboardingOpen" class="onboarding-body">
+          <ol class="onboarding-steps">
+            <li class="done"><span>1</span><div><strong>连接信息</strong><small>{{ configuration.repositoryProvider }} · {{ configuration.branchName }}</small></div></li>
+            <li :class="{ done: !imageRepositoryError }"><span>2</span><div><strong>生成配置</strong><small>{{ runtimePreset }} · {{ imageRepository || '等待镜像仓库' }}</small></div></li>
+            <li><span>3</span><div><strong>提交并运行</strong><small>{{ generatedWorkflow?.fileName || '等待有效配置' }}</small></div></li>
+          </ol>
+
+          <div class="onboarding-grid">
+            <div class="onboarding-config">
+              <div class="config-section">
+                <span class="section-kicker">01 · BUILD PRESET</span>
+                <strong>项目技术栈</strong>
+                <div class="runtime-options">
+                  <button v-for="preset in runtimePresets" :key="preset" type="button" :class="{ active: runtimePreset === preset }" @click="runtimePreset = preset">{{ preset }}</button>
+                </div>
+                <small>会生成对应的测试步骤；Docker 预设要求 Dockerfile 中存在 <code>test</code> stage。</small>
+              </div>
+
+              <div class="config-section">
+                <span class="section-kicker">02 · IMAGE DESTINATION</span>
+                <strong>镜像仓库</strong>
+                <label><input v-model.trim="imageRepository" spellcheck="false" placeholder="ghcr.io/owner/repository" /><button type="button" @click="useSuggestedImageRepository">自动填充</button></label>
+                <small v-if="imageRepositoryError" class="input-error">{{ imageRepositoryError }}</small>
+                <small v-else>镜像标签固定为 <code>sha-&lt;commit&gt;</code>，避免 latest 带来的版本漂移。</small>
+              </div>
+
+              <div class="config-section secrets-section">
+                <span class="section-kicker">03 · PROTECTED SECRETS</span>
+                <strong>在 CI 平台创建 Secrets</strong>
+                <ul v-if="generatedWorkflow"><li v-for="secret in generatedWorkflow.secrets" :key="secret"><code>{{ secret }}</code><span>{{ secret.toLowerCase().includes('url') ? callbackAbsoluteUrl : secret.toLowerCase().includes('callback_secret') ? (revealedSecret ? '使用右侧的一次性密钥' : '请轮换回调密钥后立即保存') : '镜像仓库凭据' }}</span></li></ul>
+                <p v-if="callbackIsLocal" class="local-warning">当前回调是本机地址，云端 CI 无法访问。正式使用时请通过域名/HTTPS 暴露 DevPilot，再重新生成此文件。</p>
+              </div>
+
+              <div v-if="generatedWorkflow" class="generator-notes">
+                <p v-for="note in generatedWorkflow.notes" :key="note">✓ {{ note }}</p>
+              </div>
+            </div>
+
+            <div class="workflow-preview">
+              <header><div><span>生成文件 Generated file</span><strong>{{ generatedWorkflow?.fileName || '请先完成配置' }}</strong></div><div><button type="button" :disabled="!generatedWorkflow" @click="generatedWorkflow && copy(generatedWorkflow.content)">复制 Copy</button><button class="download" type="button" :disabled="!generatedWorkflow" @click="downloadWorkflow">下载 YAML</button></div></header>
+              <pre v-if="generatedWorkflow"><code>{{ generatedWorkflow.content }}</code></pre>
+              <div v-else class="workflow-empty">填写有效镜像仓库后，在这里生成完整流水线。</div>
+              <footer v-if="generatedWorkflow"><span>下一步</span><p>把文件保存到上述路径并提交；在 CI 平台配置 Secrets，然后手动运行生产任务。</p></footer>
+            </div>
+          </div>
+        </div>
       </section>
 
       <div v-if="configurationExpanded" class="cicd-layout">
@@ -343,8 +457,10 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 .cicd-layout{grid-template-columns:minmax(0,1.25fr) 390px;gap:16px;margin-top:16px}.cicd-panel,.callback-panel,.pipeline-panel{border-radius:14px}.cicd-panel>header,.callback-panel>header,.pipeline-panel>header{min-height:68px;padding:0 20px}.cicd-panel header strong,.callback-panel header strong,.pipeline-panel header strong{font-size:14px}.cicd-panel header small,.callback-panel header small,.pipeline-panel header small{font-size:11px}.cicd-panel>header>span{font-size:10px}.cicd-form{gap:17px;padding:20px}.cicd-form label:not(.check){gap:8px;font-size:12px}.cicd-form label small{font-size:10px;line-height:1.5}.check{gap:10px;font-size:12px}.check input{width:16px;height:16px}.cicd-form .primary-action{width:auto;height:42px;padding:0 18px;font-size:12px}.callback-body{gap:16px;padding:20px}.callback-body label>span,.callback-body label>small{font-size:11px}.callback-body code{padding:11px;font-size:10px}.callback-body button{font-size:11px}.callback-body p,.callback-empty{font-size:11px}.callback-empty{padding:22px}
 .pipeline-panel{margin-top:16px}.pipeline-heading{gap:16px}.pipeline-tools{display:flex;align-items:center;gap:8px}.pipeline-tools input,.pipeline-tools select{height:36px;border:1px solid var(--line);border-radius:8px;outline:0;padding:0 10px;color:var(--text);background:rgba(15,23,42,.22);font-size:11px}.pipeline-tools input{width:190px}.pipeline-panel>header>button,.pipeline-tools button{height:36px;font-size:11px}.pipeline-state{border-radius:6px;padding:5px 8px;font-size:9px;white-space:nowrap}.pipeline-table td,.deployment-table td{font-size:11px}.pipeline-table td:first-child code{font-size:10px}.image-uri{max-width:310px;font-size:10px}.pipeline-table td small,.deployment-table td small{font-size:10px}.deployment-log summary{font-size:10px}.deployment-log pre{font:10px/1.6 ui-monospace,monospace}.rollback-action{height:34px;padding:0 11px;font-size:10px}.empty-panel p{font-size:12px}
 .activity-panel{overflow:hidden;margin:0 0 18px;border:1px solid var(--line);border-radius:15px;background:var(--panel);box-shadow:0 8px 28px rgba(38,57,84,.04)}.activity-panel>header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}.activity-panel>header div>span,.activity-panel>header strong,.activity-panel>header small{display:block}.activity-panel>header div>span{color:#76a7ff;font-size:9px;font-weight:850;letter-spacing:.13em}.activity-panel>header strong{margin-top:6px;font-size:14px}.activity-panel>header small{margin-top:4px;color:var(--muted);font-size:10px}.activity-live{display:flex!important;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.18);border-radius:20px;padding:5px 8px;color:#22c55e;font-size:9px!important;font-weight:800}.activity-live i{width:6px;height:6px;border-radius:50%;background:currentColor}.activity-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line)}.activity-list>a{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:12px;min-width:0;padding:15px 18px;color:inherit;background:var(--panel-solid);text-decoration:none}.activity-list>a:hover{background:rgba(59,130,246,.035)}.activity-kind{border:1px solid rgba(59,130,246,.18);border-radius:7px;padding:5px 7px;color:#60a5fa;background:rgba(59,130,246,.06);font-size:9px;font-weight:800}.activity-kind.rollback{border-color:rgba(245,158,11,.2);color:#f59e0b;background:rgba(245,158,11,.06)}.activity-list>a>div{min-width:0}.activity-list strong,.activity-list code,.activity-list p{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-list strong{font-size:12px}.activity-list strong small{display:inline;margin-left:5px;color:var(--muted);font-size:9px}.activity-list code{margin-top:6px;color:#8f7dd3;font-size:10px}.activity-list p{margin:5px 0 0;color:var(--muted);font-size:9px}.activity-list aside{display:grid;justify-items:end;gap:8px}.activity-list time{color:var(--muted);font-size:8px;white-space:nowrap}
+.onboarding-panel{overflow:hidden;margin-top:16px;border:1px solid rgba(59,130,246,.2);border-radius:16px;background:linear-gradient(135deg,rgba(239,246,255,.06),var(--panel) 42%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.onboarding-panel>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 22px}.onboarding-title>span,.onboarding-title>strong{display:block}.onboarding-title>span,.section-kicker{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.onboarding-title>strong{margin-top:7px;font-size:16px}.onboarding-title>p{margin:5px 0 0;color:var(--muted);font-size:11px}.onboarding-panel>header>button{height:38px;flex:0 0 auto;border:0;border-radius:9px;padding:0 14px;color:#fff;background:#2563eb;font-size:11px;font-weight:800}.onboarding-panel.expanded>header{border-bottom:1px solid var(--line)}.onboarding-body{padding:20px}.onboarding-steps{display:grid;grid-template-columns:repeat(3,1fr);margin:0 0 18px;padding:0;list-style:none}.onboarding-steps li{position:relative;display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;gap:10px}.onboarding-steps li:not(:last-child)::after{content:'';position:absolute;top:15px;right:14px;left:178px;height:1px;background:var(--line)}.onboarding-steps li>span{display:grid;width:30px;height:30px;place-items:center;border:1px solid var(--line);border-radius:50%;color:#718096;background:var(--panel-solid);font-size:10px;font-weight:850}.onboarding-steps li.done>span{border-color:rgba(34,197,94,.25);color:#16803d;background:rgba(34,197,94,.08)}.onboarding-steps strong,.onboarding-steps small{display:block;overflow:hidden;max-width:250px;text-overflow:ellipsis;white-space:nowrap}.onboarding-steps strong{font-size:11px}.onboarding-steps small{margin-top:4px;color:var(--muted);font-size:9px}.onboarding-grid{display:grid;grid-template-columns:minmax(310px,.72fr) minmax(0,1.28fr);overflow:hidden;border:1px solid var(--line);border-radius:13px;background:var(--panel-solid)}.onboarding-config{padding:20px;border-right:1px solid var(--line)}.config-section{padding:0 0 19px}.config-section+.config-section{padding-top:19px;border-top:1px solid var(--line)}.config-section>strong{display:block;margin:7px 0 11px;font-size:13px}.config-section>small{display:block;margin-top:9px;color:var(--muted);font-size:10px;line-height:1.55}.config-section code{color:#536a8c;font:10px ui-monospace,monospace}.runtime-options{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.runtime-options button{height:34px;border:1px solid var(--line);border-radius:8px;color:#5f7088;background:transparent;font-size:10px;font-weight:800}.runtime-options button.active{border-color:#6b9be9;color:#1d5fbe;background:rgba(59,130,246,.08);box-shadow:inset 0 0 0 1px rgba(59,130,246,.08)}.config-section label{display:grid;grid-template-columns:minmax(0,1fr) auto}.config-section label input{min-width:0;height:40px;border:1px solid var(--line);border-radius:9px 0 0 9px;outline:0;padding:0 11px;color:var(--text);background:var(--panel);font:10px ui-monospace,monospace}.config-section label input:focus{border-color:#78a5ed}.config-section label button{border:1px solid #78a5ed;border-left:0;border-radius:0 9px 9px 0;padding:0 11px;color:#286ac2;background:rgba(59,130,246,.07);font-size:10px;font-weight:750}.config-section .input-error{color:#dc5b5b}.secrets-section ul{display:grid;gap:7px;margin:0;padding:0;list-style:none}.secrets-section li{display:grid;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:rgba(148,163,184,.035)}.secrets-section li code{color:#286ac2;font-weight:750}.secrets-section li span{overflow:hidden;color:var(--muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.secrets-section .local-warning{margin:10px 0 0;border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px;color:#a56509;background:rgba(245,158,11,.06);font-size:10px;line-height:1.55}.generator-notes{display:grid;gap:6px}.generator-notes p{margin:0;color:#59708e;font-size:10px;line-height:1.5}.workflow-preview{display:grid;min-width:0;grid-template-rows:auto minmax(360px,1fr) auto;background:#101827}.workflow-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.08)}.workflow-preview>header span,.workflow-preview>header strong{display:block}.workflow-preview>header span{color:#7f91aa;font-size:8px}.workflow-preview>header strong{margin-top:4px;color:#d9e4f2;font:10px ui-monospace,monospace}.workflow-preview>header>div:last-child{display:flex;gap:6px}.workflow-preview button{height:31px;border:1px solid rgba(255,255,255,.13);border-radius:7px;padding:0 10px;color:#c2d0e2;background:rgba(255,255,255,.04);font-size:9px;font-weight:750}.workflow-preview button.download{border-color:#3878d1;color:#fff;background:#286ac2}.workflow-preview button:disabled{cursor:not-allowed;opacity:.4}.workflow-preview pre{max-height:620px;overflow:auto;margin:0;padding:17px}.workflow-preview pre code{color:#c5d1df;font:10px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}.workflow-empty{display:grid;place-items:center;padding:40px;color:#718096;font-size:11px}.workflow-preview>footer{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:12px 15px;border-top:1px solid rgba(255,255,255,.08);color:#8ea0b8}.workflow-preview>footer span{color:#72a4ef;font-size:9px;font-weight:850}.workflow-preview>footer p{margin:0;font-size:9px;line-height:1.5}
 @media(max-width:1100px){.delivery-flow{grid-template-columns:1fr 1fr}.delivery-flow li:nth-child(2){border-right:0}.delivery-flow li:nth-child(-n+2){border-bottom:1px solid var(--line)}.connection-strip{grid-template-columns:1fr 1fr}.connection-strip>div{border:0;border-bottom:1px solid var(--line);padding:12px}.connection-strip>button{margin:12px}.cicd-layout{grid-template-columns:1fr}.activity-list{grid-template-columns:1fr}}
-@media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}}
+@media(max-width:1100px){.onboarding-grid{grid-template-columns:1fr}.onboarding-config{border-right:0;border-bottom:1px solid var(--line)}.onboarding-steps li:not(:last-child)::after{display:none}}
+@media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}}
 :global(:root[data-theme='light']) .cicd-panel,:global(:root[data-theme='light']) .callback-panel,:global(:root[data-theme='light']) .pipeline-panel,:global(:root[data-theme='light']) .connection-strip{box-shadow:0 8px 28px rgba(38,57,84,.045)}
 :global(:root[data-theme='light']) .delivery-overview>header p{color:#5f7088}
 :global(:root[data-theme='light']) .delivery-actions a,:global(:root[data-theme='light']) .connection-strip>button{color:#41658f;background:#fff}
@@ -352,4 +468,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 :global(:root[data-theme='light']) .pipeline-tools input,:global(:root[data-theme='light']) .pipeline-tools select{background:#f8fafc}
 :global(:root[data-theme='light']) .callback-body code,:global(:root[data-theme='light']) .deployment-log pre{color:#315c94;background:#f3f6fa}
 :global(:root[data-theme='light']) .cicd-success,:global(:root[data-theme='light']) .cicd-panel>header>span.live,:global(:root[data-theme='light']) .pipeline-state.success{color:#16803d}
+:global(:root[data-theme='light']) .onboarding-panel{background:linear-gradient(135deg,#f4f8ff,#fff 42%)}
+:global(:root[data-theme='light']) .onboarding-grid{background:#fff}
+:global(:root[data-theme='light']) .config-section label input{background:#fbfcfe}
 </style>

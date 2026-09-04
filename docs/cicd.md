@@ -16,6 +16,16 @@ GitHub / GitLab
 
 The deployment host never builds application source in this mode. It pulls images that already passed the same commit's quality and security gates.
 
+## Repository onboarding generator
+
+After saving an application CI/CD configuration, open **仓库接入向导 · Repository onboarding** in the release center. Choose Node.js, Java, Go, or a Docker multi-stage test preset; confirm the target image repository; then copy or download the generated file:
+
+- GitHub Actions: `.github/workflows/devpilot.yml`
+- GitLab CI: `.gitlab-ci.yml`
+- Woodpecker: `.woodpecker/devpilot.yml`
+
+The generated pipeline includes its own quality gate, Trivy source/dependency/secret/IaC scan, immutable `sha-<commit>` image build, serialized production task, and signed DevPilot callback. It never embeds the callback secret. Create every listed variable in the CI platform's protected secret store and use the one-time secret shown by DevPilot. If the generated callback URL contains `localhost` or `127.0.0.1`, first expose DevPilot through a production DNS name with HTTPS and regenerate the file; a hosted CI runner cannot reach a loopback address.
+
 GitHub Actions publishes each component as a multi-platform manifest for
 `linux/amd64` and `linux/arm64`. Build stages run on the native builder platform
 and BuildKit cross-compiles the Agent, while QEMU is available for the small

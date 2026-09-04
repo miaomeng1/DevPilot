@@ -43,7 +43,7 @@
 
 ### P2 · 更快交付
 
-- [ ] 仓库接入向导与 GitHub/GitLab 示例 Workflow 生成器
+- [x] 仓库接入向导与 GitHub Actions / GitLab CI / Woodpecker 可执行 Workflow 生成器
 - [ ] Preview / Staging 环境与临时访问地址
 - [ ] 环境变量模板、差异预览与敏感值加密
 - [ ] Compose 项目（Stack）级纳管和关联服务视图

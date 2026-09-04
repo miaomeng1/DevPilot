@@ -113,9 +113,10 @@ Web 镜像在 `/downloads/` 提供带校验和的 amd64 / arm64 Agent 二进制�
 3. 在 DevPilot 的 **应用 Applications** 中从“自动发现”选择容器，确认预填信息后完成纳管。
 4. DevPilot 会展示镜像、容器 IP 和真实端口映射，并可生成访问与健康检查地址。
 5. 在 **发布 CI/CD** 中配置仓库、受保护分支、部署平台 API 和资源 ID。
-6. 把一次性回调 Secret 与回调 URL 存入 CI 平台的受保护 Secrets。
-7. 推送代码后，CI 自动测试、扫描并构建镜像。
-8. 生产审批通过后，DevPilot 触发部署、执行健康验证并在失败时回滚。
+6. 打开 **仓库接入向导**，选择技术栈并复制或下载 GitHub Actions、GitLab CI 或 Woodpecker 配置。
+7. 把向导列出的变量、一次性回调 Secret 与回调 URL 存入 CI 平台的受保护 Secrets。
+8. 推送代码后，CI 自动测试、扫描并构建镜像。
+9. 生产审批通过后，DevPilot 触发部署、执行健康验证并在失败时回滚。
 
 详细配置见 [CI/CD 指南](docs/cicd.md)。
 
