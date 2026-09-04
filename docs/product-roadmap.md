@@ -55,7 +55,7 @@
 ### P3 · 多机与扩展
 
 - [x] 多服务器调度建议与容量评分
-- [ ] OpenTelemetry / Prometheus 数据导出
+- [x] OpenTelemetry / Prometheus 数据导出
 - [x] 通知路由、静默窗口与维护窗口
 - [ ] 稳定公开 API 与 Webhook 事件订阅
 

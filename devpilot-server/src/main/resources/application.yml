@@ -38,15 +38,29 @@ mybatis-plus:
       logic-not-delete-value: 0
 
 management:
+  prometheus:
+    metrics:
+      export:
+        enabled: true
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
+      discovery:
+        enabled: false
   endpoint:
     health:
       probes:
         enabled: true
       show-details: never
+  otlp:
+    metrics:
+      export:
+        enabled: ${OTEL_METRICS_ENABLED:false}
+        url: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/metrics}}
+        step: ${OTEL_METRIC_EXPORT_INTERVAL:60s}
+        resource-attributes:
+          service.name: ${OTEL_SERVICE_NAME:devpilot-server}
 
 logging:
   level:
@@ -68,3 +82,6 @@ devpilot:
   maintenance:
     report-secret: ${MAINTENANCE_REPORT_SECRET:}
     backup-freshness: ${BACKUP_FRESHNESS:26h}
+  observability:
+    prometheus-scrape-token: ${PROMETHEUS_SCRAPE_TOKEN:}
+    snapshot-interval-ms: ${OBSERVABILITY_SNAPSHOT_INTERVAL_MS:30000}

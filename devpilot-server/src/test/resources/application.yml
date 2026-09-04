@@ -27,3 +27,6 @@ devpilot:
   maintenance:
     report-secret: test-maintenance-report-secret-at-least-thirty-two-bytes
     backup-freshness: 26h
+  observability:
+    prometheus-scrape-token: ""
+    snapshot-interval-ms: 30000

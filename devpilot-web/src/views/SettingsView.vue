@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { settingsApi, type UpdateSystemSettings } from '@/api/settings'
+import { observabilityApi, type ObservabilityStatus } from '@/api/observability'
 import { apiErrorMessage } from '@/api/client'
 import { useSystemStore } from '@/stores/system'
 
@@ -11,6 +12,8 @@ const saved = ref(false)
 const errorMessage = ref('')
 const webhookConfigured = ref(false)
 const webhookDestinationType = ref('NONE')
+const observability = ref<ObservabilityStatus | null>(null)
+const copied = ref('')
 const form = reactive<UpdateSystemSettings>({
   systemName: 'DevPilot', logoUrl: '', defaultTheme: 'LIGHT', accessTokenTtlMinutes: 120,
   refreshTokenTtlHours: 168, agentHeartbeatTimeoutSeconds: 30, metricIntervalSeconds: 10,
@@ -21,12 +24,19 @@ async function load() {
   loading.value = true
   errorMessage.value = ''
   try {
-    const value = await settingsApi.get()
+    const [value, telemetry] = await Promise.all([settingsApi.get(), observabilityApi.status()])
     Object.assign(form, { ...value, logoUrl: value.logoUrl || '', logDefaultLines: String(value.logDefaultLines), webhookUrl: '' })
     webhookConfigured.value = value.webhookConfigured
     webhookDestinationType.value = value.webhookDestinationType
+    observability.value = telemetry
   } catch (error) { errorMessage.value = apiErrorMessage(error, 'System settings could not be loaded') }
   finally { loading.value = false }
+}
+
+async function copy(value: string, key: string) {
+  await navigator.clipboard.writeText(value)
+  copied.value = key
+  window.setTimeout(() => { if (copied.value === key) copied.value = '' }, 1600)
 }
 
 async function save() {
@@ -63,6 +73,8 @@ onMounted(load)
         <article class="settings-panel"><header><span>03</span><div><strong>Agent & telemetry</strong><small>Agents receive collection cadence through heartbeat responses</small></div></header><div class="settings-form settings-grid"><label><span>Offline timeout</span><div class="unit-input"><input v-model.number="form.agentHeartbeatTimeoutSeconds" type="number" min="15" max="600" /><b>seconds</b></div><small>ONLINE changes to OFFLINE after this gap</small></label><label><span>Collection interval</span><div class="unit-input"><input v-model.number="form.metricIntervalSeconds" type="number" min="5" max="300" /><b>seconds</b></div><small>Metrics, Docker, and Nginx inventories</small></label><label><span>Default log tail</span><select v-model="form.logDefaultLines"><option value="100">100 lines</option><option value="500">500 lines</option></select><small>Initial Docker log stream window</small></label></div></article>
 
         <article class="settings-panel"><header><span>04</span><div><strong>Alert webhook</strong><small>Credential encrypted at rest with AES-GCM</small></div><span class="settings-state" :class="{ live: form.webhookEnabled }"><i />{{ form.webhookEnabled ? webhookDestinationType : 'OFF' }}</span></header><div class="settings-form"><label><span>Webhook URL</span><input v-model.trim="form.webhookUrl" type="url" maxlength="2000" autocomplete="off" :placeholder="webhookConfigured ? 'Configured · leave blank to keep current credential' : 'https://hooks.example.com/devpilot'" /></label><label class="settings-check"><input v-model="form.webhookEnabled" type="checkbox" /><span>Send FIRING and RESOLVED transitions</span></label><small class="settings-help">Feishu, WeCom, and Discord receive native text payloads. Other endpoints receive structured DevPilot JSON. Delivery retries five times and never follows redirects.</small></div></article>
+
+        <article class="settings-panel observability-panel"><header><span>05</span><div><strong>可观测性导出 Observability</strong><small>Prometheus 拉取或通过 OTLP/HTTP 主动推送</small></div><span class="settings-state" :class="{ live: observability?.prometheusEnabled || observability?.otlpEnabled }"><i />{{ observability?.prometheusEnabled || observability?.otlpEnabled ? 'READY' : 'OFF' }}</span></header><div class="observability-options"><section><div class="export-title"><span class="export-mark prometheus">P</span><div><strong>Prometheus scrape</strong><small>独立 Bearer Token · 默认关闭</small></div><b :class="{ live: observability?.prometheusEnabled }">{{ observability?.prometheusEnabled ? '已启用' : '未配置' }}</b></div><p>暴露 JVM、HTTP 与 DevPilot 服务器、容器、应用和告警汇总指标。</p><code>GET {{ observability?.prometheusPath || '/actuator/prometheus' }}</code><button type="button" @click="copy('authorization:\n  credentials_file: /etc/prometheus/devpilot-token', 'prom')">{{ copied === 'prom' ? '已复制 ✓' : '复制 Prometheus 配置' }}</button></section><section><div class="export-title"><span class="export-mark otlp">O</span><div><strong>OpenTelemetry OTLP</strong><small>{{ observability?.otlpProtocol || 'OTLP/HTTP protobuf' }}</small></div><b :class="{ live: observability?.otlpEnabled }">{{ observability?.otlpEnabled ? '已启用' : '未配置' }}</b></div><p>使用标准 OTEL 环境变量发送同一组低基数指标，无需在页面保存密钥。</p><code>OTEL_METRICS_ENABLED=true</code><button type="button" @click="copy('OTEL_METRICS_ENABLED=true\nOTEL_EXPORTER_OTLP_METRICS_ENDPOINT=https://collector.example/v1/metrics', 'otlp')">{{ copied === 'otlp' ? '已复制 ✓' : '复制环境变量' }}</button></section></div><footer>快照每 {{ observability?.snapshotIntervalSeconds || 30 }} 秒更新 · 不导出镜像地址、应用名或密钥</footer></article>
       </div>
 
       <aside class="settings-preview"><header><strong>Live identity preview</strong><small>Saved values update all new page views</small></header><div class="identity-preview"><img v-if="form.logoUrl" :src="form.logoUrl" alt="Logo preview" /><div v-else class="brand-symbol compact"><i /><i /><i /></div><div><strong>{{ form.systemName || 'DevPilot' }}</strong><small>Developer Cloud Console</small></div></div><dl><div><dt>Access token</dt><dd>{{ form.accessTokenTtlMinutes }} min</dd></div><div><dt>Refresh session</dt><dd>{{ form.refreshTokenTtlHours }} h</dd></div><div><dt>Agent offline</dt><dd>{{ form.agentHeartbeatTimeoutSeconds }} s</dd></div><div><dt>Collection</dt><dd>{{ form.metricIntervalSeconds }} s</dd></div></dl><p>Existing access tokens retain their signed expiry. Refresh sessions and newly issued tokens adopt changes immediately.</p></aside>

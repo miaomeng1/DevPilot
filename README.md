@@ -37,6 +37,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **个人服务模板**：一键安装 Uptime Kuma、Gitea、Audiobookshelf；固定版本、命名卷、资源上限，Web 端口默认仅绑定 `127.0.0.1`
 - **服务器监控**：CPU、负载、内存、磁盘、网络及 1h / 6h / 24h / 7d 趋势
 - **容量与部署建议**：输入新服务的内存/磁盘预估，按硬门槛过滤并透明评分，单机也能判断现在是否适合继续部署
+- **标准可观测性出口**：专用 Token 保护的 Prometheus scrape 与可选 OTLP/HTTP 推送，导出低基数控制面指标
 - **磁盘水位保护**：80% 预警、90% 高危；95% 或低于 2 GiB 时暂停新发布，空间恢复后自动继续
 - **Docker 管理**：容器发现、资源统计、启动、停止、重启、删除以及实时 WebSocket 日志
 - **Compose Stack 视图**：按 Compose 标签自动关联服务，汇总健康与资源状态，并受控顺序重启运行中的服务
@@ -208,5 +209,6 @@ cd devpilot-agent && go test ./...
 - [个人服务模板](docs/service-templates.md)
 - [通知路由与维护窗口](docs/alert-routing.md)
 - [容量与部署建议](docs/capacity-planning.md)
+- [Prometheus / OpenTelemetry 可观测性导出](docs/observability-export.md)
 - [API Map](docs/api.md)
 - [产品路线图与竞品取舍](docs/product-roadmap.md)

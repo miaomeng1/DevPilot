@@ -66,6 +66,7 @@ REDIS_PASSWORD="$(openssl rand -hex 24)"
 JWT_SECRET="$(openssl rand -hex 48)"
 MASTER_KEY="$(openssl rand -base64 32 | tr -d '\n')"
 MAINTENANCE_REPORT_SECRET="$(openssl rand -hex 48)"
+PROMETHEUS_SCRAPE_TOKEN="$(openssl rand -hex 48)"
 
 cat >"$INSTALL_DIR/.env" <<EOF
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
@@ -76,6 +77,11 @@ REDIS_PASSWORD=${REDIS_PASSWORD}
 JWT_SECRET=${JWT_SECRET}
 DEV_PILOT_MASTER_KEY=${MASTER_KEY}
 MAINTENANCE_REPORT_SECRET=${MAINTENANCE_REPORT_SECRET}
+PROMETHEUS_SCRAPE_TOKEN=${PROMETHEUS_SCRAPE_TOKEN}
+OTEL_METRICS_ENABLED=false
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://otel-collector:4318/v1/metrics
+OTEL_SERVICE_NAME=devpilot-server
+OTEL_METRIC_EXPORT_INTERVAL=60s
 BACKUP_S3_URI=
 BACKUP_S3_ENDPOINT_URL=
 BACKUP_S3_REGION=
@@ -130,6 +136,11 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       DEV_PILOT_MASTER_KEY: ${DEV_PILOT_MASTER_KEY}
       MAINTENANCE_REPORT_SECRET: ${MAINTENANCE_REPORT_SECRET}
+      PROMETHEUS_SCRAPE_TOKEN: ${PROMETHEUS_SCRAPE_TOKEN}
+      OTEL_METRICS_ENABLED: ${OTEL_METRICS_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-http://otel-collector:4318/v1/metrics}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-devpilot-server}
+      OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-60s}
       DEV_PILOT_PUBLIC_URL: ${DEV_PILOT_PUBLIC_URL}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE}
     depends_on:
@@ -178,6 +189,7 @@ server {
   client_max_body_size 20m;
   location /api/ { proxy_pass http://devpilot_server; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header X-Forwarded-Proto $scheme; }
   location /ws/ { proxy_pass http://devpilot_server; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection $connection_upgrade; proxy_set_header Host $host; proxy_read_timeout 1h; }
+  location = /actuator/prometheus { proxy_pass http://devpilot_server; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_set_header X-Forwarded-Proto $scheme; }
   location / { proxy_pass http://devpilot_web; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; }
   location = /healthz { access_log off; add_header Content-Type text/plain; return 200 'ok'; }
 }
