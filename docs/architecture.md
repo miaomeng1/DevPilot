@@ -48,6 +48,7 @@ One-click services preserve that boundary. The browser sends only an allow-liste
 2. The Agent reports host inventory and receives its server identity plus current metric interval.
 3. Heartbeats update liveness and policy. The server marks a node OFFLINE after the configured timeout.
 4. Raw 10-second points enter a Redis sorted set with a two-hour TTL; minute aggregates are upserted into MySQL and retained for seven days. Seven-day views downsample to five-minute buckets.
+5. The read-only capacity planner combines the latest metric, Docker availability, running-container count, and active alerts. Hard feasibility checks run before weighted scoring, so an offline or dangerously full node cannot win by averaging unrelated signals.
 
 ### Docker commands and logs
 

@@ -42,6 +42,15 @@ public interface AlertEventMapper extends BaseMapper<AlertEventEntity> {
     @Select("SELECT COUNT(*) FROM alert_event WHERE status IN ('FIRING','ACKNOWLEDGED') AND severity = 'CRITICAL'")
     long countActiveCritical();
 
+    @Select("SELECT COUNT(*) FROM alert_event WHERE server_id = #{serverId} AND status IN ('FIRING','ACKNOWLEDGED')")
+    long countActiveByServer(@Param("serverId") Long serverId);
+
+    @Select("""
+            SELECT COUNT(*) FROM alert_event
+            WHERE server_id = #{serverId} AND status IN ('FIRING','ACKNOWLEDGED') AND severity = 'CRITICAL'
+            """)
+    long countActiveCriticalByServer(@Param("serverId") Long serverId);
+
     @Select("""
             SELECT * FROM alert_event WHERE status IN ('FIRING','ACKNOWLEDGED')
             ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, started_at DESC

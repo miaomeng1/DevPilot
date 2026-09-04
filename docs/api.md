@@ -16,6 +16,9 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `GET /api/servers/{id}/metrics?range=1h|6h|24h|7d`
 - `GET /api/dashboard?range=1h|6h|24h`
 - `GET /api/monitor?range=1h|6h|24h|7d`
+- `GET /api/capacity/plan?memoryBytes={bytes}&diskBytes={bytes}` — read-only deployment capacity ranking.
+
+The capacity plan first excludes nodes with an offline Agent, unavailable Docker, metrics older than two minutes, or insufficient post-deployment safety reserves. Eligible nodes receive a 0–100 score from projected memory/disk headroom, CPU, load per core, running-container density, and active alert penalties. The response includes every blocker and observation; it never changes placement or starts a deployment.
 
 ## Docker and logs
 

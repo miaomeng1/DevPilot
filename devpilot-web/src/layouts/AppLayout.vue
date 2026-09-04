@@ -44,6 +44,7 @@ const navigation = computed(() => [
 
 const commandItems = computed(() => [
   ...navigation.value.map(({ label, to }) => ({ label, to, detail: '工作台 Workspace' })),
+  { label: '容量建议 Capacity planner', to: '/capacity', detail: '部署前资源评分' },
   { label: '告警规则 Alert rules', to: '/alerts/rules', detail: '策略与 Webhooks' },
   ...(auth.hasAnyRole(['ADMIN']) ? [{ label: '通知路由 Alert routing', to: '/alerts/routing', detail: '静默与维护窗口' }] : []),
   ...(auth.hasAnyRole(['ADMIN']) ? [{ label: '备份与维护 Maintenance', to: '/maintenance', detail: '备份证据与恢复' }] : []),

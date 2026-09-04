@@ -103,7 +103,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
   <section class="servers-view">
     <header class="page-heading servers-heading">
       <div><p class="eyebrow">INFRASTRUCTURE</p><h1>Servers</h1><span>Every Linux host connected to this control plane.</span></div>
-      <button v-if="canCreate" class="primary-compact" type="button" @click="openDialog"><b>＋</b>Add server</button>
+      <div class="heading-actions"><RouterLink class="secondary-compact" to="/capacity">容量建议 Capacity</RouterLink><button v-if="canCreate" class="primary-compact" type="button" @click="openDialog"><b>＋</b>Add server</button></div>
     </header>
 
     <div class="server-summary">

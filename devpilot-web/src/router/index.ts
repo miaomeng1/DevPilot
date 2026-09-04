@@ -34,6 +34,12 @@ const router = createRouter({
           meta: { title: 'Server telemetry' },
         },
         {
+          path: 'capacity',
+          name: 'capacity-planner',
+          component: () => import('@/views/CapacityPlannerView.vue'),
+          meta: { title: '容量与部署建议' },
+        },
+        {
           path: 'docker',
           name: 'docker',
           component: () => import('@/views/DockerView.vue'),
