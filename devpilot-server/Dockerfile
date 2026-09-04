@@ -5,7 +5,7 @@ COPY src src
 RUN --mount=type=cache,target=/root/.m2 mvn -B -Dmaven.test.skip=true package
 
 FROM eclipse-temurin:21-jre-alpine
-RUN apk add --no-cache curl && addgroup -S devpilot && adduser -S -G devpilot devpilot
+RUN addgroup -S devpilot && adduser -S -G devpilot devpilot
 WORKDIR /app
 COPY --from=build /workspace/target/devpilot-server.jar app.jar
 USER devpilot
