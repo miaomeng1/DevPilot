@@ -120,6 +120,25 @@ export interface ApplicationEnvironment {
   updatedAt: string | null
 }
 
+export interface CicdReadinessCheck {
+  code: string
+  status: 'PASS' | 'WARN' | 'BLOCK'
+  title: string
+  detail: string
+  action: 'CONFIGURE_CICD' | 'CONFIGURE_APPLICATION' | 'OPEN_SERVER' | 'MANAGE_ENVIRONMENT' | 'VIEW_PIPELINES' | null
+}
+
+export interface CicdReadiness {
+  applicationId: string
+  ready: boolean
+  score: number
+  blockerCount: number
+  warningCount: number
+  summary: string
+  checkedAt: string
+  checks: CicdReadinessCheck[]
+}
+
 export interface SaveApplicationEnvironmentPayload {
   expectedRevision: number
   variables: Array<{ key: string; value: string | null; secret: boolean; description: string }>
@@ -140,6 +159,10 @@ export const cicdApi = {
   },
   async deployments(applicationId: string) {
     const response = await apiClient.get<ApiResponse<CicdDeployment[]>>(`/cicd/applications/${applicationId}/deployments`)
+    return response.data.data
+  },
+  async readiness(applicationId: string) {
+    const response = await apiClient.get<ApiResponse<CicdReadiness>>(`/cicd/applications/${applicationId}/readiness`)
     return response.data.data
   },
   async activity(limit = 20) {

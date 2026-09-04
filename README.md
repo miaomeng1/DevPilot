@@ -27,6 +27,7 @@ DevPilot  ─────────→  Coolify / Dokploy
 - **CI/CD 发布中心**：接入 GitHub、GitLab、Woodpecker，查看 Commit、测试、安全扫描、镜像和生产部署状态
 - **不可变镜像**：使用 `sha-<commit>` 标签，支持 GHCR / GitLab Container Registry 和 amd64 / arm64
 - **受控部署**：只有测试和安全门禁通过后，才调用 Coolify / Dokploy 部署精确镜像；同一应用的发布持久排队、严格串行
+- **发布前检查**：在一个面板汇总 Provider、Agent、健康端点、磁盘、变量与并发状态；阻断条件恢复后排队版本自动继续
 - **安全运行配置**：环境变量模板、增删改差异、Revision 防覆盖、Secret 永不回显，以及 Coolify 发布前增量同步
 - **健康检查与回滚**：部署完成后等待新的 Agent 探测；失败时保留旧版本并自动回滚
 - **应用工作台**：关联镜像、容器、服务器、容器 IP、宿主机端口、Access URL 和 Health URL

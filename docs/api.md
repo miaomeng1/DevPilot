@@ -29,6 +29,7 @@ All responses use `{ "code": 0, "message": "success", "data": ... }`. Browser AP
 - `GET|PUT /api/cicd/configurations/{applicationId}`
 - `GET /api/cicd/applications/{applicationId}/runs`
 - `GET /api/cicd/applications/{applicationId}/deployments`
+- `GET /api/cicd/applications/{applicationId}/readiness`
 - `GET|PUT /api/cicd/applications/{applicationId}/environment`
 - `POST /api/cicd/applications/{applicationId}/environment/sync`
 - `POST /api/cicd/applications/{applicationId}/deployments/{deploymentId}/rollback`

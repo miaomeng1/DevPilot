@@ -135,6 +135,62 @@ class CicdIntegrationTests {
     }
 
     @Test
+    void releasePreflightExplainsConfigurationBlockers() throws Exception {
+        Fixture fixture = createApplication();
+
+        mockMvc.perform(get("/api/cicd/applications/{id}/readiness", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ready", is(false)))
+                .andExpect(jsonPath("$.data.blockerCount", is(4)))
+                .andExpect(jsonPath("$.data.checks.length()", is(11)))
+                .andExpect(jsonPath("$.data.checks[0].code", is("CONFIGURATION")))
+                .andExpect(jsonPath("$.data.checks[0].status", is("BLOCK")))
+                .andExpect(jsonPath("$.data.checks[0].action", is("CONFIGURE_CICD")))
+                .andExpect(jsonPath("$.data.checks[4].code", is("AGENT")))
+                .andExpect(jsonPath("$.data.checks[4].status", is("PASS")));
+    }
+
+    @Test
+    void releasePreflightBecomesReadyWithFreshHealthAndCapacityEvidence() throws Exception {
+        Fixture fixture = createApplication();
+        mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                                 "providerBaseUrl":"https://coolify.example/api/v1","providerApiToken":"provider-token",
+                                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                                 "autoRollback":true,"healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk());
+        reportHealth(fixture, "HEALTHY");
+        mockMvc.perform(post("/api/agent/metrics")
+                        .header("X-DevPilot-Agent-Token", fixture.agentToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"agentVersion":"0.1.0","collectedAt":"%s","cpuUsage":12.0,
+                                 "loadOne":0.2,"loadFive":0.2,"loadFifteen":0.2,
+                                 "memoryTotal":16000000000,"memoryUsed":4000000000,"memoryAvailable":12000000000,
+                                 "diskTotal":500000000000,"diskUsed":100000000000,"diskFree":400000000000,
+                                 "networkBytesSent":1,"networkBytesReceived":1,
+                                 "networkUploadRate":1.0,"networkDownloadRate":1.0}
+                                """.formatted(Instant.now())))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/cicd/applications/{id}/readiness", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ready", is(true)))
+                .andExpect(jsonPath("$.data.blockerCount", is(0)))
+                .andExpect(jsonPath("$.data.warningCount", is(1)))
+                .andExpect(jsonPath("$.data.score", is(96)))
+                .andExpect(jsonPath("$.data.checks[5].status", is("PASS")))
+                .andExpect(jsonPath("$.data.checks[6].status", is("PASS")))
+                .andExpect(jsonPath("$.data.checks[10].code", is("ARTIFACT")))
+                .andExpect(jsonPath("$.data.checks[10].status", is("WARN")));
+    }
+
+    @Test
     void dirtyEnvironmentIsSafelySyncedBeforeCoolifyDeployment() throws Exception {
         Fixture fixture = createApplication();
         MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
@@ -345,6 +401,44 @@ class CicdIntegrationTests {
 
         org.junit.jupiter.api.Assertions.assertEquals("TRIGGERED", jdbcTemplate.queryForObject(
                 "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'run-disk'", String.class));
+        verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/demo", null, null, null, image);
+    }
+
+    @Test
+    void releasePreflightQueuesWhileAgentIsOfflineAndResumesWhenOnline() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                                 "deploymentWebhookUrl":"https://coolify.example/deploy/demo",
+                                 "autoDeploy":true,"productionApproval":true,"autoRollback":true,
+                                 "healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String secret = data(configured).path("oneTimeCallbackSecret").asText();
+        jdbcTemplate.update("UPDATE server_node SET agent_status = 'OFFLINE'");
+        String image = "ghcr.io/acme/demo:sha-dddddddddddd";
+        String body = callback("run-offline", "dddddddddddddddddddddddddddddddddddddddd",
+                "SUCCEEDED", "PASSED", "PASSED", image);
+
+        mockMvc.perform(post("/api/cicd/webhooks/demo").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-DevPilot-Signature", sign(secret, body)).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.deployStatus", is("QUEUED")))
+                .andExpect(jsonPath("$.data.deployError")
+                        .value(org.hamcrest.Matchers.containsString("Agent 连接")));
+        org.junit.jupiter.api.Assertions.assertEquals(0L,
+                jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_deployment", Long.class));
+
+        jdbcTemplate.update("UPDATE server_node SET agent_status = 'ONLINE', last_heartbeat = ?",
+                LocalDateTime.now(ZoneOffset.UTC));
+        cicdDeploymentService.reconcileQueued();
+
+        org.junit.jupiter.api.Assertions.assertEquals("TRIGGERED", jdbcTemplate.queryForObject(
+                "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'run-offline'", String.class));
         verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
                 "https://coolify.example/deploy/demo", null, null, null, image);
     }

@@ -42,6 +42,7 @@ public class CicdDeploymentService {
     private final ApplicationDeploymentMapper applicationDeploymentMapper;
     private final DeploymentWebhookClient providerClient;
     private final ApplicationEnvironmentService environmentService;
+    private final CicdReadinessService readinessService;
     private final SensitiveSettingCipher cipher;
     private final ServerNodeService serverNodeService;
     private final MetricService metricService;
@@ -57,6 +58,11 @@ public class CicdDeploymentService {
         String storageBlock = storageBlock(application);
         if (storageBlock != null) {
             queue(run, storageBlock);
+            return;
+        }
+        String readinessBlock = readinessService.blockingReason(application.getId());
+        if (readinessBlock != null) {
+            queue(run, readinessBlock);
             return;
         }
         startRelease(configuration, run);
@@ -180,6 +186,11 @@ public class CicdDeploymentService {
             String storageBlock = storageBlock(application);
             if (storageBlock != null) {
                 queue(run, storageBlock);
+                continue;
+            }
+            String readinessBlock = readinessService.blockingReason(application.getId());
+            if (readinessBlock != null) {
+                queue(run, readinessBlock);
                 continue;
             }
             startRelease(configuration, run);

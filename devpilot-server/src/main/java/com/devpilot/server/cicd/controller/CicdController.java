@@ -4,11 +4,13 @@ import com.devpilot.server.cicd.dto.CicdConfigurationRequest;
 import com.devpilot.server.cicd.dto.CicdConfigurationResponse;
 import com.devpilot.server.cicd.dto.CicdActivityResponse;
 import com.devpilot.server.cicd.dto.CicdDeploymentResponse;
+import com.devpilot.server.cicd.dto.CicdReadinessResponse;
 import com.devpilot.server.cicd.dto.PipelineRunResponse;
 import com.devpilot.server.cicd.dto.ApplicationEnvironmentResponse;
 import com.devpilot.server.cicd.dto.SaveApplicationEnvironmentRequest;
 import com.devpilot.server.cicd.service.ApplicationEnvironmentService;
 import com.devpilot.server.cicd.service.CicdDeploymentService;
+import com.devpilot.server.cicd.service.CicdReadinessService;
 import com.devpilot.server.cicd.service.CicdService;
 import com.devpilot.server.common.ApiResponse;
 import com.devpilot.server.security.DevPilotPrincipal;
@@ -34,6 +36,7 @@ public class CicdController {
     private final CicdService cicdService;
     private final CicdDeploymentService deploymentService;
     private final ApplicationEnvironmentService environmentService;
+    private final CicdReadinessService readinessService;
 
     @GetMapping("/configurations/{applicationId}")
     public ApiResponse<CicdConfigurationResponse> configuration(@PathVariable Long applicationId) {
@@ -57,6 +60,11 @@ public class CicdController {
     @GetMapping("/applications/{applicationId}/deployments")
     public ApiResponse<List<CicdDeploymentResponse>> deployments(@PathVariable Long applicationId) {
         return ApiResponse.success(deploymentService.list(applicationId));
+    }
+
+    @GetMapping("/applications/{applicationId}/readiness")
+    public ApiResponse<CicdReadinessResponse> readiness(@PathVariable Long applicationId) {
+        return ApiResponse.success(readinessService.inspect(applicationId));
     }
 
     @GetMapping("/applications/{applicationId}/environment")

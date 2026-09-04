@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { applicationApi, type Application } from '@/api/applications'
-import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type PipelineRun } from '@/api/cicd'
+import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdReadiness, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
 
 const auth = useAuthStore()
+const router = useRouter()
 const applications = ref<Application[]>([])
 const selectedId = ref('')
 const configuration = ref<CicdConfiguration | null>(null)
@@ -29,6 +31,8 @@ const environmentDraft = ref<EnvironmentDraftVariable[]>([])
 const environmentOpen = ref(false)
 const environmentSaving = ref(false)
 const environmentSyncing = ref(false)
+const readiness = ref<CicdReadiness | null>(null)
+const readinessRefreshing = ref(false)
 const runFilter = ref('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
@@ -254,6 +258,7 @@ async function saveEnvironment() {
     })
     environment.value = saved
     resetEnvironmentDraft(saved)
+    await refreshReadiness()
     successMessage.value = `环境变量 Revision ${saved.revision} 已加密保存，发布前将检查同步状态。`
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法保存环境变量 Environment')
@@ -269,6 +274,7 @@ async function syncEnvironment() {
     const synced = await cicdApi.syncEnvironment(selectedId.value)
     environment.value = synced
     resetEnvironmentDraft(synced)
+    await refreshReadiness()
     if (synced.syncStatus === 'SYNCED') successMessage.value = `Revision ${synced.revision} 已安全同步到 Coolify。`
     else errorMessage.value = synced.syncError || '环境变量同步失败'
   } catch (error) {
@@ -299,12 +305,13 @@ async function loadApplication(silent = false) {
   // explicitly switches/reloads the application.
   if (!silent) revealedSecret.value = ''
   try {
-    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult] = await Promise.all([
+    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult] = await Promise.all([
       cicdApi.configuration(selectedId.value).catch(() => null),
       cicdApi.runs(selectedId.value),
       cicdApi.deployments(selectedId.value),
       applicationApi.get(selectedId.value),
       cicdApi.environment(selectedId.value),
+      cicdApi.readiness(selectedId.value),
     ])
     configuration.value = configurationResult
     if (!silent) {
@@ -314,6 +321,7 @@ async function loadApplication(silent = false) {
     runs.value = pipelineRuns
     deployments.value = deploymentHistory
     environment.value = environmentResult
+    readiness.value = readinessResult
     if (!silent) {
       resetEnvironmentDraft(environmentResult)
       environmentOpen.value = environmentResult.variables.length > 0
@@ -364,6 +372,7 @@ async function save() {
     configurationExpanded.value = false
     onboardingOpen.value = true
     imageRepository.value = suggestedImageRepository(saved.repositoryUrl, saved.repositoryProvider)
+    await refreshReadiness()
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法保存 CI/CD 配置 Configuration')
   } finally { saving.value = false }
@@ -381,6 +390,33 @@ async function rollback(deployment: CicdDeployment) {
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法触发回滚 Rollback')
   } finally { rollingBack.value = '' }
+}
+
+async function refreshReadiness() {
+  if (!selectedId.value || readinessRefreshing.value) return
+  readinessRefreshing.value = true
+  try { readiness.value = await cicdApi.readiness(selectedId.value) }
+  catch (error) { errorMessage.value = apiErrorMessage(error, '无法检查发布就绪状态 Release preflight') }
+  finally { readinessRefreshing.value = false }
+}
+
+function readinessActionLabel(action: string | null) {
+  return ({
+    CONFIGURE_CICD: '打开 CI/CD 配置', CONFIGURE_APPLICATION: '检查应用配置', OPEN_SERVER: '查看服务器',
+    MANAGE_ENVIRONMENT: '管理环境变量', VIEW_PIPELINES: '查看流水线',
+  } as Record<string, string>)[action || ''] || ''
+}
+
+async function handleReadinessAction(action: string | null) {
+  if (!action) return
+  if (action === 'CONFIGURE_APPLICATION') return router.push(`/applications/${selectedId.value}`)
+  if (action === 'OPEN_SERVER') return router.push(`/servers/${selectedApp.value?.serverId || ''}`)
+  if (action === 'CONFIGURE_CICD') configurationExpanded.value = true
+  if (action === 'MANAGE_ENVIRONMENT') environmentOpen.value = true
+  await nextTick()
+  const selector = action === 'CONFIGURE_CICD' ? '.cicd-layout'
+    : action === 'MANAGE_ENVIRONMENT' ? '.cicd-environment-panel' : '.pipeline-panel'
+  document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 async function copy(value: string) {
@@ -458,6 +494,22 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       <section class="delivery-overview">
         <header><div><span>当前发布 · CURRENT DELIVERY</span><strong>{{ latestRun ? statusLabel(latestRun.deployStatus) : '等待首次流水线' }}</strong><p>{{ releaseGuidance }}</p></div><div class="delivery-actions"><a v-if="configuration?.repositoryUrl" :href="configuration.repositoryUrl" target="_blank" rel="noreferrer">打开代码仓库 ↗</a><button type="button" @click="configurationExpanded = !configurationExpanded">{{ configurationExpanded ? '收起配置' : '配置与密钥' }}</button></div></header>
         <ol class="delivery-flow"><li v-for="(step, index) in deliverySteps" :key="step.label" :class="step.state"><span>{{ index + 1 }}</span><div><strong>{{ step.label }}</strong><small>{{ step.detail }}</small></div></li></ol>
+      </section>
+
+      <section v-if="readiness" class="readiness-panel" :class="{ ready: readiness.ready, blocked: !readiness.ready }">
+        <header>
+          <div class="readiness-score"><strong>{{ readiness.score }}</strong><span>/ 100</span></div>
+          <div class="readiness-title"><span>发布前检查 · RELEASE PREFLIGHT</span><strong>{{ readiness.ready ? '可以自动发布 Ready to deploy' : '暂不可自动发布 Action required' }}</strong><p>{{ readiness.summary }} · 检查于 {{ formatTime(readiness.checkedAt) }}</p></div>
+          <div class="readiness-summary"><b v-if="readiness.blockerCount" class="block">{{ readiness.blockerCount }} BLOCK</b><b v-if="readiness.warningCount" class="warn">{{ readiness.warningCount }} WARN</b><button type="button" :disabled="readinessRefreshing" @click="refreshReadiness">{{ readinessRefreshing ? '检查中…' : '重新检查' }}</button></div>
+        </header>
+        <div class="readiness-progress"><i :style="{ width: `${readiness.score}%` }" /></div>
+        <div class="readiness-checks">
+          <article v-for="check in readiness.checks" :key="check.code" :class="check.status.toLowerCase()">
+            <span class="readiness-icon">{{ check.status === 'PASS' ? '✓' : check.status === 'WARN' ? '!' : '×' }}</span>
+            <div><strong>{{ check.title }}</strong><p>{{ check.detail }}</p></div>
+            <button v-if="check.action" type="button" @click="handleReadinessAction(check.action)">{{ readinessActionLabel(check.action) }} →</button>
+          </article>
+        </div>
       </section>
 
       <section v-if="configuration && !configurationExpanded" class="connection-strip">
@@ -638,6 +690,10 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 .pipeline-panel{margin-top:16px}.pipeline-heading{gap:16px}.pipeline-tools{display:flex;align-items:center;gap:8px}.pipeline-tools input,.pipeline-tools select{height:36px;border:1px solid var(--line);border-radius:8px;outline:0;padding:0 10px;color:var(--text);background:rgba(15,23,42,.22);font-size:11px}.pipeline-tools input{width:190px}.pipeline-panel>header>button,.pipeline-tools button{height:36px;font-size:11px}.pipeline-state{border-radius:6px;padding:5px 8px;font-size:9px;white-space:nowrap}.pipeline-table td,.deployment-table td{font-size:11px}.pipeline-table td:first-child code{font-size:10px}.image-uri{max-width:310px;font-size:10px}.pipeline-table td small,.deployment-table td small{font-size:10px}.deployment-log summary{font-size:10px}.deployment-log pre{font:10px/1.6 ui-monospace,monospace}.rollback-action{height:34px;padding:0 11px;font-size:10px}.empty-panel p{font-size:12px}
 .activity-panel{overflow:hidden;margin:0 0 18px;border:1px solid var(--line);border-radius:15px;background:var(--panel);box-shadow:0 8px 28px rgba(38,57,84,.04)}.activity-panel>header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px;border-bottom:1px solid var(--line)}.activity-panel>header div>span,.activity-panel>header strong,.activity-panel>header small{display:block}.activity-panel>header div>span{color:#76a7ff;font-size:9px;font-weight:850;letter-spacing:.13em}.activity-panel>header strong{margin-top:6px;font-size:14px}.activity-panel>header small{margin-top:4px;color:var(--muted);font-size:10px}.activity-live{display:flex!important;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.18);border-radius:20px;padding:5px 8px;color:#22c55e;font-size:9px!important;font-weight:800}.activity-live i{width:6px;height:6px;border-radius:50%;background:currentColor}.activity-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line)}.activity-list>a{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:12px;min-width:0;padding:15px 18px;color:inherit;background:var(--panel-solid);text-decoration:none}.activity-list>a:hover{background:rgba(59,130,246,.035)}.activity-kind{border:1px solid rgba(59,130,246,.18);border-radius:7px;padding:5px 7px;color:#60a5fa;background:rgba(59,130,246,.06);font-size:9px;font-weight:800}.activity-kind.rollback{border-color:rgba(245,158,11,.2);color:#f59e0b;background:rgba(245,158,11,.06)}.activity-list>a>div{min-width:0}.activity-list strong,.activity-list code,.activity-list p{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-list strong{font-size:12px}.activity-list strong small{display:inline;margin-left:5px;color:var(--muted);font-size:9px}.activity-list code{margin-top:6px;color:#8f7dd3;font-size:10px}.activity-list p{margin:5px 0 0;color:var(--muted);font-size:9px}.activity-list aside{display:grid;justify-items:end;gap:8px}.activity-list time{color:var(--muted);font-size:8px;white-space:nowrap}
 .onboarding-panel{overflow:hidden;margin-top:16px;border:1px solid rgba(59,130,246,.2);border-radius:16px;background:linear-gradient(135deg,rgba(239,246,255,.06),var(--panel) 42%);box-shadow:0 10px 32px rgba(38,57,84,.04)}.onboarding-panel>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:20px 22px}.onboarding-title>span,.onboarding-title>strong{display:block}.onboarding-title>span,.section-kicker{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.onboarding-title>strong{margin-top:7px;font-size:16px}.onboarding-title>p{margin:5px 0 0;color:var(--muted);font-size:11px}.onboarding-panel>header>button{height:38px;flex:0 0 auto;border:0;border-radius:9px;padding:0 14px;color:#fff;background:#2563eb;font-size:11px;font-weight:800}.onboarding-panel.expanded>header{border-bottom:1px solid var(--line)}.onboarding-body{padding:20px}.onboarding-steps{display:grid;grid-template-columns:repeat(3,1fr);margin:0 0 18px;padding:0;list-style:none}.onboarding-steps li{position:relative;display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;gap:10px}.onboarding-steps li:not(:last-child)::after{content:'';position:absolute;top:15px;right:14px;left:178px;height:1px;background:var(--line)}.onboarding-steps li>span{display:grid;width:30px;height:30px;place-items:center;border:1px solid var(--line);border-radius:50%;color:#718096;background:var(--panel-solid);font-size:10px;font-weight:850}.onboarding-steps li.done>span{border-color:rgba(34,197,94,.25);color:#16803d;background:rgba(34,197,94,.08)}.onboarding-steps strong,.onboarding-steps small{display:block;overflow:hidden;max-width:250px;text-overflow:ellipsis;white-space:nowrap}.onboarding-steps strong{font-size:11px}.onboarding-steps small{margin-top:4px;color:var(--muted);font-size:9px}.onboarding-grid{display:grid;grid-template-columns:minmax(310px,.72fr) minmax(0,1.28fr);overflow:hidden;border:1px solid var(--line);border-radius:13px;background:var(--panel-solid)}.onboarding-config{padding:20px;border-right:1px solid var(--line)}.config-section{padding:0 0 19px}.config-section+.config-section{padding-top:19px;border-top:1px solid var(--line)}.config-section>strong{display:block;margin:7px 0 11px;font-size:13px}.config-section>small{display:block;margin-top:9px;color:var(--muted);font-size:10px;line-height:1.55}.config-section code{color:#536a8c;font:10px ui-monospace,monospace}.runtime-options{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.runtime-options button{height:34px;border:1px solid var(--line);border-radius:8px;color:#5f7088;background:transparent;font-size:10px;font-weight:800}.runtime-options button.active{border-color:#6b9be9;color:#1d5fbe;background:rgba(59,130,246,.08);box-shadow:inset 0 0 0 1px rgba(59,130,246,.08)}.config-section label{display:grid;grid-template-columns:minmax(0,1fr) auto}.config-section label input{min-width:0;height:40px;border:1px solid var(--line);border-radius:9px 0 0 9px;outline:0;padding:0 11px;color:var(--text);background:var(--panel);font:10px ui-monospace,monospace}.config-section label input:focus{border-color:#78a5ed}.config-section label button{border:1px solid #78a5ed;border-left:0;border-radius:0 9px 9px 0;padding:0 11px;color:#286ac2;background:rgba(59,130,246,.07);font-size:10px;font-weight:750}.config-section .input-error{color:#dc5b5b}.secrets-section ul{display:grid;gap:7px;margin:0;padding:0;list-style:none}.secrets-section li{display:grid;gap:4px;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:rgba(148,163,184,.035)}.secrets-section li code{color:#286ac2;font-weight:750}.secrets-section li span{overflow:hidden;color:var(--muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap}.secrets-section .local-warning{margin:10px 0 0;border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:10px;color:#a56509;background:rgba(245,158,11,.06);font-size:10px;line-height:1.55}.generator-notes{display:grid;gap:6px}.generator-notes p{margin:0;color:#59708e;font-size:10px;line-height:1.5}.workflow-preview{display:grid;min-width:0;grid-template-rows:auto minmax(360px,1fr) auto;background:#101827}.workflow-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid rgba(255,255,255,.08)}.workflow-preview>header span,.workflow-preview>header strong{display:block}.workflow-preview>header span{color:#7f91aa;font-size:8px}.workflow-preview>header strong{margin-top:4px;color:#d9e4f2;font:10px ui-monospace,monospace}.workflow-preview>header>div:last-child{display:flex;gap:6px}.workflow-preview button{height:31px;border:1px solid rgba(255,255,255,.13);border-radius:7px;padding:0 10px;color:#c2d0e2;background:rgba(255,255,255,.04);font-size:9px;font-weight:750}.workflow-preview button.download{border-color:#3878d1;color:#fff;background:#286ac2}.workflow-preview button:disabled{cursor:not-allowed;opacity:.4}.workflow-preview pre{max-height:620px;overflow:auto;margin:0;padding:17px}.workflow-preview pre code{color:#c5d1df;font:10px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}.workflow-empty{display:grid;place-items:center;padding:40px;color:#718096;font-size:11px}.workflow-preview>footer{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:12px 15px;border-top:1px solid rgba(255,255,255,.08);color:#8ea0b8}.workflow-preview>footer span{color:#72a4ef;font-size:9px;font-weight:850}.workflow-preview>footer p{margin:0;font-size:9px;line-height:1.5}
+.readiness-panel{overflow:hidden;margin-top:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 10px 32px rgba(38,57,84,.04)}
+.readiness-panel>header{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:16px;padding:18px 20px}.readiness-score{display:flex;width:68px;height:58px;align-items:baseline;justify-content:center;border:1px solid rgba(59,130,246,.16);border-radius:12px;color:#2563eb;background:rgba(59,130,246,.055)}.readiness-score strong{align-self:center;font-size:24px;line-height:1}.readiness-score span{align-self:center;margin:9px 0 0 3px;color:#8391a5;font-size:8px}.readiness-title>span,.readiness-title>strong{display:block}.readiness-title>span{color:#6595e7;font-size:9px;font-weight:850;letter-spacing:.13em}.readiness-title>strong{margin-top:6px;font-size:15px}.readiness-title>p{margin:4px 0 0;color:var(--muted);font-size:10px}.readiness-panel.ready .readiness-score{border-color:rgba(34,197,94,.2);color:#16803d;background:rgba(34,197,94,.06)}.readiness-panel.blocked .readiness-score{border-color:rgba(239,68,68,.18);color:#c24141;background:rgba(239,68,68,.05)}
+.readiness-summary{display:flex;align-items:center;gap:6px}.readiness-summary b{border-radius:6px;padding:5px 7px;font-size:8px}.readiness-summary b.block{color:#c24141;background:rgba(239,68,68,.08)}.readiness-summary b.warn{color:#9a670c;background:rgba(245,158,11,.1)}.readiness-summary button{height:34px;border:1px solid var(--line);border-radius:8px;padding:0 10px;color:#41658f;background:transparent;font-size:9px;font-weight:750}.readiness-summary button:disabled{opacity:.45}.readiness-progress{height:3px;background:rgba(148,163,184,.1)}.readiness-progress i{display:block;height:100%;background:#60a5fa;transition:width .25s ease}.readiness-panel.ready .readiness-progress i{background:#4ade80}.readiness-panel.blocked .readiness-progress i{background:#f08a8a}
+.readiness-checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line)}.readiness-checks article{display:grid;grid-template-columns:26px minmax(0,1fr);grid-template-rows:auto auto;column-gap:9px;min-height:88px;padding:13px 14px;background:var(--panel-solid)}.readiness-icon{display:grid;width:24px;height:24px;grid-row:1/3;place-items:center;border-radius:8px;color:#16803d;background:rgba(34,197,94,.08);font-size:11px;font-weight:900}.readiness-checks article.warn .readiness-icon{color:#a56509;background:rgba(245,158,11,.1)}.readiness-checks article.block .readiness-icon{color:#c24141;background:rgba(239,68,68,.08)}.readiness-checks article strong{font-size:10px}.readiness-checks article p{margin:4px 0 0;color:var(--muted);font-size:9px;line-height:1.45}.readiness-checks article>button{grid-column:2;margin-top:8px;justify-self:start;border:0;padding:0;color:#3975c6;background:transparent;font-size:8px;font-weight:750}
 .cicd-environment-panel{overflow:hidden;margin-top:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 10px 32px rgba(38,57,84,.04)}
 .cicd-environment-panel>header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 22px}
 .cicd-environment-panel.expanded>header{border-bottom:1px solid var(--line)}
@@ -649,7 +705,9 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 @media(max-width:1100px){.delivery-flow{grid-template-columns:1fr 1fr}.delivery-flow li:nth-child(2){border-right:0}.delivery-flow li:nth-child(-n+2){border-bottom:1px solid var(--line)}.connection-strip{grid-template-columns:1fr 1fr}.connection-strip>div{border:0;border-bottom:1px solid var(--line);padding:12px}.connection-strip>button{margin:12px}.cicd-layout{grid-template-columns:1fr}.activity-list{grid-template-columns:1fr}}
 @media(max-width:1100px){.onboarding-grid{grid-template-columns:1fr}.onboarding-config{border-right:0;border-bottom:1px solid var(--line)}.onboarding-steps li:not(:last-child)::after{display:none}}
 @media(max-width:1100px){.environment-body{grid-template-columns:1fr}.environment-templates{grid-template-columns:1fr 1fr 1fr}.environment-templates>div{grid-column:1/-1}.environment-row{grid-template-columns:1fr 1fr}.environment-description{grid-column:1/-1}.secret-toggle,.remove-variable{justify-self:start}}
+@media(max-width:1100px){.readiness-checks{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.delivery-overview>header{padding:20px;flex-direction:column}.delivery-actions{width:100%}.delivery-actions a,.delivery-actions button{flex:1;justify-content:center}.delivery-flow{grid-template-columns:1fr}.delivery-flow li{border-right:0!important;border-bottom:1px solid var(--line)!important}.delivery-flow li:last-child{border-bottom:0!important}.connection-strip{grid-template-columns:1fr}.pipeline-heading{align-items:stretch!important;flex-direction:column}.pipeline-tools{display:grid;grid-template-columns:1fr 1fr}.pipeline-tools input{grid-column:1/-1;width:100%}.pipeline-tools button{height:36px!important}.cicd-summary article{padding:16px}.cicd-heading p{font-size:12px}.onboarding-panel>header,.cicd-environment-panel>header{align-items:flex-start;flex-direction:column}.onboarding-panel>header>button{width:100%}.onboarding-body,.environment-body{padding:14px}.onboarding-steps{grid-template-columns:1fr;gap:10px}.runtime-options{grid-template-columns:1fr 1fr}.onboarding-config{padding:15px}.workflow-preview>header{align-items:flex-start;flex-direction:column}.workflow-preview>header>div:last-child{width:100%}.workflow-preview>header button{flex:1}.workflow-preview pre{max-height:500px}.onboarding-title>p{line-height:1.5}.environment-header-actions{width:100%;justify-content:space-between}.environment-templates{grid-template-columns:1fr 1fr}.environment-row{grid-template-columns:1fr}.environment-description{grid-column:auto}.secret-toggle,.remove-variable{justify-self:stretch}.remove-variable{width:100%}}
+@media(max-width:700px){.readiness-panel>header{grid-template-columns:auto 1fr}.readiness-summary{grid-column:1/-1}.readiness-checks{grid-template-columns:1fr}}
 :global(:root[data-theme='light']) .cicd-panel,:global(:root[data-theme='light']) .callback-panel,:global(:root[data-theme='light']) .pipeline-panel,:global(:root[data-theme='light']) .connection-strip{box-shadow:0 8px 28px rgba(38,57,84,.045)}
 :global(:root[data-theme='light']) .delivery-overview>header p{color:#5f7088}
 :global(:root[data-theme='light']) .delivery-actions a,:global(:root[data-theme='light']) .connection-strip>button{color:#41658f;background:#fff}
