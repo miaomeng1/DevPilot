@@ -21,7 +21,10 @@ public class CicdConfigurationEntity {
     private String providerBaseUrlCipher;
     private String providerApiTokenCipher;
     private String providerResourceId;
+    private LocalDateTime providerVerifiedAt;
+    private String providerVerificationError;
     private String callbackSecretCipher;
+    private LocalDateTime callbackVerifiedAt;
     private Integer autoDeploy;
     private Integer productionApproval;
     private Integer autoRollback;

@@ -10,7 +10,7 @@ steps:
   web-test:
     image: node:22-alpine
     commands:
-      - cd devpilot-web && npm ci && npm run type-check && npm run build
+      - cd devpilot-web && npm ci && npm test && npm run type-check && npm run build
 
   agent-test:
     image: golang:1.25-alpine

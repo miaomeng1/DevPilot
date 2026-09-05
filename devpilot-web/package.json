@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-strip-types --test src/utils/workflowTemplates.test.mjs",
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "type-check": "vue-tsc -b --pretty false",

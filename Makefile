@@ -2,7 +2,7 @@
 
 test:
 	cd devpilot-server && mvn test
-	cd devpilot-web && npm run type-check && npm run build
+	cd devpilot-web && npm test && npm run type-check && npm run build
 	cd devpilot-agent && go test ./...
 
 build: server web agent

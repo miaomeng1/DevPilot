@@ -18,6 +18,8 @@ The deployment host never builds application source in this mode. It pulls image
 
 ## Repository onboarding generator
 
+For automatic execution (provider resource creation, runtime configuration, CI secrets and workflow PR/MR), use **自动接入新项目**. See [Automatic onboarding](automatic-onboarding.md) for its prerequisites, supported paths and verification boundaries. The copy/download generator below remains available for manual integrations.
+
 After saving an application CI/CD configuration, open **仓库接入向导 · Repository onboarding** in the release center. Choose Node.js, Java, Go, or a Docker multi-stage test preset; confirm the target image repository; then copy or download the generated file:
 
 - GitHub Actions: `.github/workflows/devpilot.yml`

@@ -134,14 +134,24 @@ public class CicdService {
         entity.setDeploymentProvider(request.deploymentProvider());
         entity.setDeploymentMode(mode);
         entity.setAutoDeploy(request.autoDeploy() ? 1 : 0);
-        entity.setProductionApproval(request.productionApproval() ? 1 : 0);
-        entity.setAutoRollback(Boolean.FALSE.equals(request.autoRollback()) ? 0 : 1);
+        entity.setProductionApproval(1); // Production confirmation lives in the generated CI workflow, not a bypass switch.
+        if (create || request.autoRollback() != null) {
+            entity.setAutoRollback(Boolean.TRUE.equals(request.autoRollback()) ? 1 : 0);
+        }
         entity.setHealthTimeoutSeconds(request.healthTimeoutSeconds() == null ? 120 : request.healthTimeoutSeconds());
         entity.setPreviewEnabled(previewEnabled ? 1 : 0);
         entity.setPreviewUrlTemplate(previewUrlTemplate);
         entity.setPreviewTtlHours(request.previewTtlHours() == null ? 72 : request.previewTtlHours());
         entity.setUpdatedAt(now());
         if (create) configurationMapper.insert(entity); else configurationMapper.updateById(entity);
+        if (baseUrl != null || apiToken != null || resourceId != null) {
+            configurationMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<CicdConfigurationEntity>()
+                    .eq("id", entity.getId()).set("provider_verified_at", null).set("provider_verification_error", null));
+        }
+        if (create || Boolean.TRUE.equals(request.rotateCallbackSecret())) {
+            configurationMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<CicdConfigurationEntity>()
+                    .eq("id", entity.getId()).set("callback_verified_at", null));
+        }
         return toConfiguration(entity, application, oneTimeSecret, oneTimePreviewSecret);
     }
 
@@ -156,6 +166,7 @@ public class CicdService {
         if (application == null) {
             throw BusinessException.notFound(40420, "应用不存在");
         }
+        application = applicationMapper.selectByIdForUpdate(application.getId());
         CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(application.getId());
         if (configuration == null) {
             throw BusinessException.notFound(40440, "CI/CD 配置不存在");
@@ -175,6 +186,9 @@ public class CicdService {
             throw BusinessException.badRequest(40042, "回调分支与应用配置不一致");
         }
         validateSuccessfulGate(request);
+        configurationMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<CicdConfigurationEntity>()
+                .eq("id", configuration.getId()).eq("callback_secret_cipher", configuration.getCallbackSecretCipher())
+                .set("callback_verified_at", now()));
         CicdPipelineRunEntity run = pipelineMapper.selectByExternalRunId(application.getId(), request.externalRunId());
         boolean create = run == null;
         LocalDateTime timestamp = now();
@@ -192,7 +206,11 @@ public class CicdService {
         run.setTestStatus(request.testStatus());
         run.setSecurityStatus(request.securityStatus());
         run.setImageUri(trimToNull(request.imageUri()));
-        run.setImageDigest(trimToNull(request.imageDigest()));
+        String imageDigest = trimToNull(request.imageDigest());
+        if (imageDigest == null && run.getImageUri() != null && run.getImageUri().contains("@sha256:")) {
+            imageDigest = run.getImageUri().substring(run.getImageUri().lastIndexOf('@') + 1);
+        }
+        run.setImageDigest(imageDigest);
         run.setRunUrl(trimToNull(request.runUrl()));
         run.setSummary(trimToNull(request.summary()));
         run.setCompletedAt(terminal(request.status()) ? timestamp : null);
@@ -204,7 +222,7 @@ public class CicdService {
         return toRun(run);
     }
 
-    private static void validateSuccessfulGate(PipelineCallbackRequest request) {
+    static void validateSuccessfulGate(PipelineCallbackRequest request) {
         if (!"SUCCEEDED".equals(request.status())) return;
         if (!"PASSED".equals(request.testStatus()) || !"PASSED".equals(request.securityStatus())) {
             throw BusinessException.badRequest(40043, "测试与安全扫描必须全部通过后才能标记流水线成功");
@@ -213,6 +231,11 @@ public class CicdService {
         if (image == null || !(image.matches(".+@sha256:[0-9a-fA-F]{64}$")
                 || image.matches(".+:sha-[0-9a-fA-F]{7,64}$"))) {
             throw BusinessException.badRequest(40044, "成功流水线必须提供不可变 digest 或 sha-* 镜像");
+        }
+        String digest = trimToNull(request.imageDigest());
+        if (digest != null && (!digest.matches("sha256:[0-9a-f]{64}")
+                || !image.endsWith("@" + digest))) {
+            throw BusinessException.badRequest(40049, "镜像摘要必须与 imageUri 中的 digest 完全一致");
         }
         int tagMarker = image.lastIndexOf(":sha-");
         if (tagMarker > image.lastIndexOf('/') && !request.commitSha().toLowerCase()
@@ -248,7 +271,7 @@ public class CicdService {
                 entity.getDeploymentWebhookCipher() != null, entity.getProviderBaseUrlCipher() != null,
                 entity.getProviderApiTokenCipher() != null, entity.getProviderResourceId(),
                 entity.getCallbackSecretCipher() != null, entity.getAutoDeploy() == 1,
-                entity.getProductionApproval() == 1, entity.getAutoRollback() == null || entity.getAutoRollback() == 1,
+                entity.getProductionApproval() == 1, Integer.valueOf(1).equals(entity.getAutoRollback()),
                 entity.getHealthTimeoutSeconds() == null ? 120 : entity.getHealthTimeoutSeconds(),
                 Integer.valueOf(1).equals(entity.getPreviewEnabled()), entity.getPreviewUrlTemplate(),
                 entity.getPreviewTtlHours() == null ? 72 : entity.getPreviewTtlHours(),

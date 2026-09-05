@@ -139,11 +139,11 @@ async function openDialog(container?: DockerContainer) {
 }
 
 async function createApplication() {
-  if (!form.name || !form.code || !form.serverId || !form.containerSnapshotId) return
+  if (!form.name || !form.code || !form.serverId) return
   saving.value = true
   errorMessage.value = ''
   try {
-    const created = await applicationApi.create({ ...form, code: form.code?.trim().toLowerCase() })
+    const created = await applicationApi.create({ ...form, containerSnapshotId: form.containerSnapshotId || null, code: form.code?.trim().toLowerCase() })
     applications.value.unshift(created)
     dialogOpen.value = false
   } catch (error) {
@@ -266,14 +266,14 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
           <p>应用是稳定的业务对象，即使底层容器因为发布而更换，也能持续追踪。</p>
           <div class="form-grid"><label><span>名称 Name</span><input v-model.trim="form.name" maxlength="120" placeholder="订单服务" /></label><label><span>编码 Code</span><input v-model.trim="form.code" maxlength="64" pattern="[a-z][a-z0-9-]+" placeholder="order-api" /></label></div>
           <div class="form-grid"><label><span>环境 Environment</span><select v-model="form.environment"><option v-for="environment in ['DEV','TEST','STAGING','PRODUCTION']" :key="environment" :value="environment">{{ environment }}</option></select></label><label><span>服务器 Server</span><select v-model="form.serverId" @change="loadContainers()"><option disabled value="">选择服务器</option><option v-for="server in servers.servers" :key="server.id" :value="server.id">{{ server.name }}</option></select></label></div>
-          <label><span>Docker 容器 Container</span><select v-model="form.containerSnapshotId"><option disabled value="">选择已发现的容器</option><option v-for="container in containers" :key="container.id" :value="container.id">{{ container.name }} · {{ container.image }} · {{ container.state }}</option></select></label>
+          <label><span>Docker 容器 Container（可选）</span><select v-model="form.containerSnapshotId"><option value="">首次部署后自动关联</option><option v-for="container in containers" :key="container.id" :value="container.id">{{ container.name }} · {{ container.image }} · {{ container.state }}</option></select></label>
           <aside v-if="selectedContainer" class="detected-runtime"><div><span>已识别镜像</span><code>{{ selectedContainer.image }}</code></div><div><span>运行端口</span><code v-for="port in selectedContainer.ports" :key="port">{{ port }}</code><code v-if="!selectedContainer.ports.length">无公开端口</code></div><button v-if="publicPort(selectedContainer.ports)" type="button" @click="useDetectedEndpoints">使用检测到的端口</button></aside>
           <div class="form-grid"><label><span>当前版本 Version</span><input v-model.trim="form.currentVersion" maxlength="120" placeholder="v1.2.3 / sha-abc123" /></label><label><span>访问地址 Access URL</span><input v-model.trim="form.accessUrl" maxlength="1000" placeholder="https://app.example.com" /></label></div>
           <label><span>健康检查 Health URL</span><input v-model.trim="form.healthCheckUrl" maxlength="1000" placeholder="http://127.0.0.1:9090/healthz" /><small>由所选服务器上的 Agent 每 30 秒执行一次 HTTP(S) 探测。</small></label>
           <label><span>说明 Description</span><textarea v-model.trim="form.description" maxlength="1000" rows="3" placeholder="这个服务负责什么，谁依赖它。" /></label>
           <p v-if="errorMessage" class="form-error"><span>!</span>{{ errorMessage }}</p>
         </div>
-        <footer><button @click="dialogOpen = false">取消</button><button class="dialog-primary" :disabled="saving || !form.name || !form.code || !form.serverId || !form.containerSnapshotId" @click="createApplication">{{ saving ? '登记中…' : '确认登记' }} <b>→</b></button></footer>
+        <footer><button @click="dialogOpen = false">取消</button><button class="dialog-primary" :disabled="saving || !form.name || !form.code || !form.serverId" @click="createApplication">{{ saving ? '登记中…' : '确认登记' }} <b>→</b></button></footer>
       </section>
     </div>
   </section>

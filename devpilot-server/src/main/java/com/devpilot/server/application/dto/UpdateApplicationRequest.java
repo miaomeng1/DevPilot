@@ -10,7 +10,7 @@ public record UpdateApplicationRequest(
         @Size(max = 1000) String description,
         @NotBlank @Pattern(regexp = "DEV|TEST|STAGING|PRODUCTION") String environment,
         @NotNull Long serverId,
-        @NotNull Long containerSnapshotId,
+        Long containerSnapshotId,
         @Size(max = 120) String currentVersion,
         @Size(max = 1000) String healthCheckUrl,
         @Size(max = 1000) String accessUrl) {

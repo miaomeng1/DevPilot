@@ -48,6 +48,8 @@ class CicdIntegrationTests {
     @Autowired private CicdDeploymentService cicdDeploymentService;
     @Autowired private CicdPreviewService cicdPreviewService;
     @MockitoBean private DeploymentWebhookClient deploymentWebhookClient;
+    @MockitoBean private com.devpilot.server.cicd.onboarding.RepositoryOnboardingClient onboardingRepositories;
+    @MockitoBean private com.devpilot.server.cicd.onboarding.ProviderOnboardingClient onboardingProviders;
 
     @BeforeEach
     void resetDatabase() {
@@ -189,8 +191,7 @@ class CicdIntegrationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.ready", is(true)))
                 .andExpect(jsonPath("$.data.blockerCount", is(0)))
-                .andExpect(jsonPath("$.data.warningCount", is(1)))
-                .andExpect(jsonPath("$.data.score", is(96)))
+                .andExpect(jsonPath("$.data.warningCount", is(3)))
                 .andExpect(jsonPath("$.data.checks[5].status", is("PASS")))
                 .andExpect(jsonPath("$.data.checks[6].status", is("PASS")))
                 .andExpect(jsonPath("$.data.checks[10].code", is("ARTIFACT")))
@@ -716,6 +717,8 @@ class CicdIntegrationTests {
         cicdDeploymentService.reconcileTriggered();
         org.junit.jupiter.api.Assertions.assertEquals("sha-111111111111", jdbcTemplate.queryForObject(
                 "SELECT current_version FROM application WHERE id = ?", String.class, fixture.applicationId()));
+        org.junit.jupiter.api.Assertions.assertEquals("ROLLED_BACK", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment WHERE image_uri = ? AND deployment_kind = 'RELEASE'", String.class, imageB));
 
         submitSuccessfulCallback(secret, "run-c", "3333333333333333333333333333333333333333", imageC);
         reportHealth(fixture, "HEALTHY");
@@ -736,6 +739,200 @@ class CicdIntegrationTests {
                 "https://coolify.example/deploy/demo", null, null, null, imageB);
         verify(deploymentWebhookClient, times(1)).deploy("COOLIFY", "WEBHOOK",
                 "https://coolify.example/deploy/demo", null, null, null, imageC);
+
+        // Even with auto rollback enabled, a failed rollback must not recurse.
+        Integer before = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_deployment", Integer.class);
+        reportHealth(fixture, "UNHEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals(before,
+                jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_deployment", Integer.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_deployment WHERE deployment_kind = 'ROLLBACK' AND status = 'UNHEALTHY'", Integer.class));
+    }
+
+    @Test
+    void rejectedAutomaticRollbackFinishesFailedReleaseWithoutRewritingHealthyHistory() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult configured = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                                 "deploymentWebhookUrl":"https://coolify.example/deploy/demo",
+                                 "autoDeploy":true,"productionApproval":true,"autoRollback":true,
+                                 "healthTimeoutSeconds":60,"rotateCallbackSecret":false}
+                                """))
+                .andExpect(status().isOk()).andReturn();
+        String secret = data(configured).path("oneTimeCallbackSecret").asText();
+        String healthyImage = "ghcr.io/acme/demo:sha-111111111111";
+        submitSuccessfulCallback(secret, "healthy-run", "1111111111111111111111111111111111111111", healthyImage);
+        reportHealth(fixture, "HEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        when(deploymentWebhookClient.deploy("COOLIFY", "WEBHOOK",
+                "https://coolify.example/deploy/demo", null, null, null, healthyImage))
+                .thenThrow(new IllegalStateException("provider rejected rollback"));
+        submitSuccessfulCallback(secret, "failed-run", "2222222222222222222222222222222222222222",
+                "ghcr.io/acme/demo:sha-222222222222");
+        reportHealth(fixture, "UNHEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("ROLLBACK_FAILED", jdbcTemplate.queryForObject(
+                "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'failed-run'", String.class));
+        org.junit.jupiter.api.Assertions.assertEquals("HEALTHY", jdbcTemplate.queryForObject(
+                "SELECT deploy_status FROM cicd_pipeline_run WHERE external_run_id = 'healthy-run'", String.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_deployment WHERE status = 'ROLLBACK_FAILED'", Integer.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM cicd_deployment WHERE deployment_kind = 'ROLLBACK' AND status = 'FAILED'", Integer.class));
+    }
+
+    @Test
+    void rollbackRequiresOptInAndOmittedUpdatePreservesChoice() throws Exception {
+        Fixture fixture = createApplication();
+        String body = """
+                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"WEBHOOK",
+                 "deploymentWebhookUrl":"https://coolify.example/deploy/demo",
+                 "autoDeploy":true,"productionApproval":true,"rotateCallbackSecret":false}
+                """;
+        mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.autoRollback", is(false)));
+        mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content(body.replace("\"autoDeploy\"", "\"autoRollback\":true,\"autoDeploy\"")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.autoRollback", is(true)));
+        mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.autoRollback", is(true)));
+    }
+
+    @Test
+    void coolifyOldHealthyEndpointCannotCompleteAnUnfinishedDeployment() throws Exception {
+        Fixture fixture = createApplication();
+        MvcResult result = mockMvc.perform(put("/api/cicd/configurations/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content("""
+                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo",
+                 "branchName":"main","deploymentProvider":"COOLIFY","deploymentMode":"API",
+                 "providerBaseUrl":"https://coolify.example","providerApiToken":"token",
+                 "providerResourceId":"app_42","autoDeploy":true,"productionApproval":true,
+                 "autoRollback":false,"rotateCallbackSecret":false}
+                """)).andExpect(status().isOk()).andReturn();
+        when(deploymentWebhookClient.deploy("COOLIFY", "API", null, "https://coolify.example", "token",
+                "app_42", "ghcr.io/acme/demo:sha-abcdef123456")).thenReturn("deploy-1");
+        submitSuccessfulCallback(data(result).path("oneTimeCallbackSecret").asText(), "new-run",
+                "abcdef123456abcdef123456abcdef123456abcdef", "ghcr.io/acme/demo:sha-abcdef123456");
+        when(deploymentWebhookClient.fetchDeploymentState("COOLIFY", "https://coolify.example", "token",
+                "app_42", "deploy-1")).thenReturn(DeploymentState.UNKNOWN);
+        reportHealth(fixture, "HEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("TRIGGERED", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment", String.class));
+        when(deploymentWebhookClient.fetchDeploymentState("COOLIFY", "https://coolify.example", "token",
+                "app_42", "deploy-1")).thenReturn(DeploymentState.SUCCEEDED);
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("VERIFYING", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment", String.class));
+        // The pre-completion probe remains insufficient.
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("VERIFYING", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment", String.class));
+        reportHealth(fixture, "HEALTHY");
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("VERIFYING", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment", String.class));
+        jdbcTemplate.update("UPDATE docker_container_snapshot SET image = ?, last_seen_at = ?",
+                "ghcr.io/acme/demo:sha-abcdef123456", LocalDateTime.now(ZoneOffset.UTC));
+        cicdDeploymentService.reconcileTriggered();
+        org.junit.jupiter.api.Assertions.assertEquals("HEALTHY", jdbcTemplate.queryForObject(
+                "SELECT status FROM cicd_deployment", String.class));
+    }
+
+    @Test
+    void applicationFollowsReplacementContainerInsteadOfOldSnapshot() throws Exception {
+        Fixture fixture = createApplication();
+        var payload = objectMapper.readTree(snapshotPayload());
+        var container = (com.fasterxml.jackson.databind.node.ObjectNode) payload.path("containers").get(0);
+        container.put("containerId", "replacement-container-id");
+        container.put("image", "ghcr.io/acme/demo:sha-222222222222");
+        mockMvc.perform(post("/api/agent/docker/snapshot")
+                .header("X-DevPilot-Agent-Token", fixture.agentToken())
+                .contentType(MediaType.APPLICATION_JSON).content(payload.toString())).andExpect(status().isOk());
+        mockMvc.perform(get("/api/applications/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.containerId", is("replacement-container-id")))
+                .andExpect(jsonPath("$.data.dockerImage", is("ghcr.io/acme/demo:sha-222222222222")))
+                .andExpect(jsonPath("$.data.status", is("RUNNING")));
+    }
+
+    @Test
+    void newApplicationDoesNotNeedAnExistingContainer() throws Exception {
+        Fixture fixture = createApplication();
+        String serverId = jdbcTemplate.queryForObject("SELECT server_id FROM application WHERE id = ?", String.class, fixture.applicationId());
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content("""
+                {"name":"New project","code":"first-deploy","environment":"PRODUCTION","serverId":"%s"}
+                """.formatted(serverId))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.containerSnapshotId").doesNotExist());
+    }
+
+    @Test
+    void onboardingResumesFailedStepDoesNotRecreateApplicationAndClearsSecrets() throws Exception {
+        Fixture fixture = createApplication();
+        var repo = new com.devpilot.server.cicd.onboarding.RepositoryOnboardingClient.Repository(
+                "https://api.github.com/repos/acme/demo", "acme/demo", "main", "ghcr.io/acme/demo", "FROM node:22", "NODE", "https://github.com/acme/demo");
+        when(onboardingRepositories.inspect("GITHUB", "https://github.com/acme/demo", "repository-secret")).thenReturn(repo);
+        when(onboardingProviders.discover("DOKPLOY", "https://deploy.example", "provider-secret"))
+                .thenReturn(new com.devpilot.server.cicd.onboarding.ProviderOnboardingClient.Discovery(
+                        java.util.List.of(new com.devpilot.server.cicd.onboarding.ProviderOnboardingClient.Target("p", "e", "Personal")),
+                        java.util.List.of(new com.devpilot.server.cicd.onboarding.ProviderOnboardingClient.Server("", "Local", ""))));
+        when(onboardingProviders.ensureApplication(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq("demo"), org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(new com.devpilot.server.cicd.onboarding.ProviderOnboardingClient.Application("app1", "swarm:app1"));
+        org.mockito.Mockito.doThrow(new com.devpilot.server.cicd.onboarding.OnboardingHttpClient.RemoteFailure("DOKPLOY POST HTTP 503", 503))
+                .doNothing().when(onboardingProviders).configure(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq("app1"));
+        when(onboardingRepositories.proposeWorkflow(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq("demo"), org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn("https://github.com/acme/demo/pull/1");
+        String request = """
+                {"repositoryProvider":"GITHUB","repositoryUrl":"https://github.com/acme/demo","repositoryToken":"repository-secret",
+                 "deploymentProvider":"DOKPLOY","providerBaseUrl":"https://deploy.example","providerApiToken":"provider-secret",
+                 "projectId":"p","environmentId":"e","providerServerId":"","publicBaseUrl":"https://ops.example",
+                 "containerPort":8080,"hostPort":18081,"healthPath":"/health","imageRepository":"ghcr.io/acme/demo",
+                 "branch":"main","workflowContent":"workflow_dispatch","environmentValues":{"DATABASE_PASSWORD":"runtime-secret"}}
+                """;
+        for (int repeat = 0; repeat < 2; repeat++) {
+            mockMvc.perform(post("/api/cicd/onboarding/{id}", fixture.applicationId())
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                    .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.stage", is(0)))
+                    .andExpect(jsonPath("$.data.requestCipher").doesNotExist());
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_onboarding", Integer.class));
+        String stored = jdbcTemplate.queryForObject("SELECT request_cipher FROM cicd_onboarding", String.class);
+        org.junit.jupiter.api.Assertions.assertFalse(stored.contains("repository-secret"));
+        for (int stage = 0; stage < 3; stage++) {
+            mockMvc.perform(post("/api/cicd/onboarding/{id}/advance", fixture.applicationId())
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk());
+        }
+        org.junit.jupiter.api.Assertions.assertEquals("FAILED", jdbcTemplate.queryForObject("SELECT status FROM cicd_onboarding", String.class));
+        org.junit.jupiter.api.Assertions.assertEquals(2, jdbcTemplate.queryForObject("SELECT stage FROM cicd_onboarding", Integer.class));
+        for (int stage = 2; stage < 5; stage++) {
+            mockMvc.perform(post("/api/cicd/onboarding/{id}/advance", fixture.applicationId())
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk());
+        }
+        mockMvc.perform(get("/api/cicd/onboarding/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status", is("AWAITING_MERGE")))
+                .andExpect(jsonPath("$.data.changeUrl", is("https://github.com/acme/demo/pull/1")));
+        org.junit.jupiter.api.Assertions.assertNull(jdbcTemplate.queryForObject("SELECT request_cipher FROM cicd_onboarding", String.class));
+        verify(onboardingProviders, times(1)).ensureApplication(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq("demo"), org.mockito.ArgumentMatchers.anyString());
+        verify(deploymentWebhookClient, times(0)).deploy(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
     private void submitSuccessfulCallback(String secret, String runId, String commitSha, String image) throws Exception {

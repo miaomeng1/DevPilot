@@ -128,6 +128,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
 
     private static boolean isSecret(String field, String path) {
         String lower = field.toLowerCase();
+        if (path.startsWith("/api/cicd/onboarding") && (lower.equals("environmentvalues") || lower.equals("workflowcontent"))) return true;
         if (path.matches("/api/cicd/applications/\\d+/environment(?:/sync)?") && lower.equals("value")) {
             return true;
         }

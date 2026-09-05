@@ -37,6 +37,7 @@ public class DockerInventoryService {
     private final DockerHostSnapshotMapper hostMapper;
     private final DockerContainerSnapshotMapper containerMapper;
     private final ObjectMapper objectMapper;
+    private final com.devpilot.server.application.mapper.ApplicationMapper applicationMapper;
 
     @Transactional
     public Long ingest(String rawToken, AgentDockerSnapshotRequest request) {
@@ -72,7 +73,35 @@ public class DockerInventoryService {
         for (AgentDockerContainerSnapshot snapshot : request.containers()) {
             upsert(serverId, snapshot, now);
         }
+        rebindApplications(serverId, now);
         return serverId;
+    }
+
+    private void rebindApplications(Long serverId, LocalDateTime timestamp) {
+        List<DockerContainerSnapshotEntity> active = containerMapper.selectActive(serverId);
+        for (var candidate : applicationMapper.selectByServer(serverId)) {
+            var application = applicationMapper.selectByIdForUpdate(candidate.getId());
+            if (!serverId.equals(application.getServerId())) continue;
+            var previous = application.getContainerSnapshotId() == null ? null
+                    : containerMapper.selectById(application.getContainerSnapshotId());
+            String key = application.getRuntimeKey();
+            if (key == null && previous != null) key = previous.getRuntimeKey();
+            if (key == null && previous != null) key = "name:" + previous.getName();
+            if (key == null) continue;
+            String identity = key;
+            var matches = active.stream().filter(c -> identity.equals(c.getRuntimeKey())
+                    && "running".equalsIgnoreCase(c.getState())).toList();
+            // During a rolling update two replicas can coexist. Do not guess which one serves traffic.
+            if (matches.size() != 1) continue;
+            var current = matches.getFirst();
+            if (!current.getId().equals(application.getContainerSnapshotId()) || application.getRuntimeKey() == null) {
+                application.setContainerSnapshotId(current.getId());
+                application.setRuntimeKey(identity);
+                application.setStatus("RUNNING");
+                application.setUpdatedAt(timestamp);
+                applicationMapper.updateById(application);
+            }
+        }
     }
 
     public DockerOverviewResponse overview(Long serverId) {
@@ -121,6 +150,10 @@ public class DockerInventoryService {
         }
         entity.setName(normalizeName(snapshot.name()));
         entity.setImage(snapshot.image());
+        entity.setRuntimeKey(snapshot.runtimeKey() == null || snapshot.runtimeKey().isBlank()
+                ? (snapshot.composeProject() != null && snapshot.composeService() != null
+                    ? "compose:" + snapshot.composeProject() + ":" + snapshot.composeService()
+                    : "name:" + normalizeName(snapshot.name())) : snapshot.runtimeKey());
         entity.setState(snapshot.state().toLowerCase(Locale.ROOT));
         entity.setStatus(trimToNull(snapshot.status()));
         entity.setHealth(trimToNull(snapshot.health()));

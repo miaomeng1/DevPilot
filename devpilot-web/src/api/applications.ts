@@ -40,7 +40,7 @@ export interface ApplicationPayload {
   description: string
   environment: ApplicationEnvironment
   serverId: string
-  containerSnapshotId: string
+  containerSnapshotId: string | null
   currentVersion: string
   healthCheckUrl: string
   accessUrl: string
@@ -79,7 +79,7 @@ export const applicationApi = {
 
   async update(id: string, payload: ApplicationPayload) {
     const { code: _code, ...body } = payload
-    const response = await apiClient.put<ApiResponse<Application>>(`/applications/${id}`, body)
+    const response = await apiClient.put<ApiResponse<Application>>(`/applications/${id}`, { ...body, containerSnapshotId: body.containerSnapshotId || null })
     return response.data.data
   },
 

@@ -50,6 +50,7 @@ public class CicdDeploymentService {
     private final ServerNodeService serverNodeService;
     private final MetricService metricService;
     private final AutomationWebhookService automationWebhooks;
+    private final com.devpilot.server.docker.mapper.DockerContainerSnapshotMapper containers;
 
     @Transactional
     public void requestRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
@@ -189,12 +190,17 @@ public class CicdDeploymentService {
             if (deployment == null || !active(deployment.getStatus())) continue;
             refreshProviderLogs(deployment);
             CicdConfigurationEntity configuration = configurationMapper.selectByApplicationId(deployment.getApplicationId());
-            if (configuration != null && "API".equals(valueOr(configuration.getDeploymentMode(), "WEBHOOK"))
-                    && "DOKPLOY".equals(configuration.getDeploymentProvider())) {
-                DeploymentState providerState = providerClient.fetchDeploymentState(
+            if (configuration != null && "API".equals(valueOr(configuration.getDeploymentMode(), "WEBHOOK"))) {
+                DeploymentState providerState;
+                try {
+                    providerState = providerClient.fetchDeploymentState(
                         configuration.getDeploymentProvider(), decrypt(configuration.getProviderBaseUrlCipher()),
                         decrypt(configuration.getProviderApiTokenCipher()), configuration.getProviderResourceId(),
                         deployment.getProviderDeploymentId());
+                } catch (RuntimeException unavailable) {
+                    // A failed status request is not evidence of success, and must not block other applications.
+                    providerState = DeploymentState.UNKNOWN;
+                }
                 if (providerState == DeploymentState.FAILED) {
                     markUnhealthyAndRollback(deployment, application, timestamp, "Deployment provider reported FAILED");
                     continue;
@@ -218,12 +224,21 @@ public class CicdDeploymentService {
             boolean freshProbe = application.getHealthCheckedAt() != null
                     && application.getHealthCheckedAt().isAfter("VERIFYING".equals(deployment.getStatus())
                     ? deployment.getUpdatedAt() : deployment.getStartedAt().plusSeconds(HEALTH_STABILIZATION_SECONDS));
-            if (freshProbe && "HEALTHY".equals(application.getHealthStatus())) {
+            boolean runtimeMatches = true;
+            if (configuration != null && "API".equals(configuration.getDeploymentMode())) {
+                var container = application.getContainerSnapshotId() == null ? null : containers.selectById(application.getContainerSnapshotId());
+                runtimeMatches = container != null && Integer.valueOf(1).equals(container.getActive())
+                        && "running".equalsIgnoreCase(container.getState())
+                        && runtimeImageMatches(deployment.getImageUri(), container.getImage())
+                        && container.getLastSeenAt() != null && container.getLastSeenAt().isAfter(deployment.getStartedAt());
+            }
+            if (freshProbe && runtimeMatches && "HEALTHY".equals(application.getHealthStatus())) {
                 markHealthy(deployment, application, timestamp);
             } else if ((freshProbe && "UNHEALTHY".equals(application.getHealthStatus()))
                     || !timestamp.isBefore(deployment.getHealthDeadlineAt())) {
                 markUnhealthyAndRollback(deployment, application, timestamp,
-                        freshProbe ? "Application health check reported UNHEALTHY" : "Health verification timed out");
+                        !runtimeMatches ? "Expected image was not observed in the application's running container before deadline"
+                                : freshProbe ? "Application health check reported UNHEALTHY" : "Health verification timed out");
             }
         }
     }
@@ -323,6 +338,7 @@ public class CicdDeploymentService {
         deployment.setUpdatedAt(now());
         deploymentMapper.updateById(deployment);
         if ("FAILED".equals(deployment.getStatus())) {
+            if ("ROLLBACK".equals(deployment.getDeploymentKind())) finishRollback(deployment, false, now());
             ApplicationEntity application = applicationMapper.selectById(deployment.getApplicationId());
             if (application != null) automationWebhooks.publishDeployment(deployment, application, false);
         }
@@ -330,6 +346,17 @@ public class CicdDeploymentService {
             run.setUpdatedAt(now());
             pipelineMapper.updateById(run);
         }
+    }
+
+    static boolean runtimeImageMatches(String expected, String observed) {
+        if (expected == null || observed == null) return false;
+        if (expected.equals(observed)) return true;
+        if (!expected.contains("@") && observed.startsWith(expected + "@sha256:")) return true;
+        if (!expected.contains("@sha256:") || !observed.contains("@sha256:")) return false;
+        String expectedRepo = expected.substring(0, expected.indexOf('@'));
+        String observedRepo = observed.substring(0, observed.indexOf('@'));
+        if (observedRepo.lastIndexOf(':') > observedRepo.lastIndexOf('/')) observedRepo = observedRepo.substring(0, observedRepo.lastIndexOf(':'));
+        return expectedRepo.equals(observedRepo) && expected.substring(expected.indexOf('@')).equals(observed.substring(observed.indexOf('@')));
     }
 
     private void markHealthy(CicdDeploymentEntity deployment, ApplicationEntity application, LocalDateTime timestamp) {
@@ -344,7 +371,20 @@ public class CicdDeploymentService {
         applicationMapper.updateById(application);
         automationWebhooks.publishDeployment(deployment, application, true);
         recordApplicationDeployment(deployment, application, "SUCCESS", deployment.getLogs(), timestamp);
-        updatePipeline(deployment.getPipelineRunId(), "HEALTHY", null);
+        if ("ROLLBACK".equals(deployment.getDeploymentKind())) finishRollback(deployment, true, timestamp);
+        else updatePipeline(deployment.getPipelineRunId(), "HEALTHY", null);
+    }
+
+    private void finishRollback(CicdDeploymentEntity rollback, boolean healthy, LocalDateTime timestamp) {
+        if (rollback.getRollbackOfId() == null) return;
+        CicdDeploymentEntity failed = deploymentMapper.selectById(rollback.getRollbackOfId());
+        // Manual rollback references a healthy target; never rewrite that historical success.
+        if (failed == null || !"ROLLBACK_TRIGGERED".equals(failed.getStatus())) return;
+        failed.setStatus(healthy ? "ROLLED_BACK" : "ROLLBACK_FAILED");
+        failed.setLogs(append(failed.getLogs(), "Rollback " + rollback.getId() + (healthy ? " restored a healthy version" : " failed; manual intervention required")));
+        failed.setUpdatedAt(timestamp);
+        deploymentMapper.updateById(failed);
+        updatePipeline(failed.getPipelineRunId(), failed.getStatus(), healthy ? "发布失败，已恢复上一健康版本" : "回滚失败，请人工处理");
     }
 
     private void markUnhealthyAndRollback(CicdDeploymentEntity deployment, ApplicationEntity application,
@@ -356,10 +396,11 @@ public class CicdDeploymentService {
         deploymentMapper.updateById(deployment);
         automationWebhooks.publishDeployment(deployment, application, false);
         recordApplicationDeployment(deployment, application, "FAILED", deployment.getLogs(), timestamp);
-        updatePipeline(deployment.getPipelineRunId(), "HEALTH_FAILED", reason);
+        if ("ROLLBACK".equals(deployment.getDeploymentKind())) finishRollback(deployment, false, timestamp);
+        else updatePipeline(deployment.getPipelineRunId(), "HEALTH_FAILED", reason);
 
         CicdConfigurationEntity configuration = requireConfiguration(application.getId());
-        if (configuration.getAutoRollback() != null && configuration.getAutoRollback() == 0) return;
+        if (!Integer.valueOf(1).equals(configuration.getAutoRollback())) return;
         if ("ROLLBACK".equals(deployment.getDeploymentKind())) return;
         CicdDeploymentEntity target = deploymentMapper.selectLatestHealthy(application.getId());
         if (target == null || target.getImageUri().equals(deployment.getImageUri())) return;

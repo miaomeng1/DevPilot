@@ -70,7 +70,7 @@ public class CicdReadinessService {
         long passes = checks.stream().filter(check -> "PASS".equals(check.status())).count();
         int score = (int) Math.round((passes + warnings * 0.6) * 100.0 / checks.size());
         String summary = blockers > 0 ? blockers + " 个阻断项需要处理"
-                : warnings > 0 ? "可以自动发布，另有 " + warnings + " 个建议项"
+                : warnings > 0 ? "暂无阻断项，仍有 " + warnings + " 个告警或未验证项；发布需人工确认"
                 : "所有发布前检查均已通过";
         return new CicdReadinessResponse(applicationId, blockers == 0, score, blockers, warnings,
                 summary, timestamp, checks);
@@ -118,17 +118,22 @@ public class CicdReadinessService {
                 && configuration.getProviderApiTokenCipher() != null
                 && configuration.getProviderResourceId() != null
                 : configuration.getDeploymentWebhookCipher() != null;
-        return ready
-                ? check("PROVIDER", "PASS", "部署 Provider",
-                configuration.getDeploymentProvider() + " · " + configuration.getDeploymentMode(), null)
-                : check("PROVIDER", "BLOCK", "部署 Provider", "部署凭据或资源 ID 不完整。", "CONFIGURE_CICD");
+        if (!ready) return check("PROVIDER", "BLOCK", "部署 Provider", "部署凭据或资源 ID 不完整。", "CONFIGURE_CICD");
+        if (configuration.getProviderVerificationError() != null) return check("PROVIDER", "BLOCK", "部署 Provider",
+                configuration.getProviderVerificationError(), "VERIFY_PROVIDER");
+        if (configuration.getProviderVerifiedAt() == null || configuration.getProviderVerifiedAt().isBefore(now().minusMinutes(15))) {
+            return check("PROVIDER", "WARN", "部署 Provider", "凭据已保存，但尚无近期连接验证；不能据此确认 Key、资源 ID 或网络可用。", "VERIFY_PROVIDER");
+        }
+        return check("PROVIDER", "PASS", "部署 Provider", "平台连接和应用 ID 已验证（15 分钟内）。", "VERIFY_PROVIDER");
     }
 
-    private static CicdReadinessCheckResponse callbackCheck(CicdConfigurationEntity configuration) {
+    private CicdReadinessCheckResponse callbackCheck(CicdConfigurationEntity configuration) {
         boolean ready = configuration != null && configuration.getCallbackSecretCipher() != null;
-        return ready
-                ? check("CALLBACK", "PASS", "签名回调", "CI 回调密钥已加密配置。", null)
-                : check("CALLBACK", "BLOCK", "签名回调", "缺少 CI 回调密钥。", "CONFIGURE_CICD");
+        if (!ready) return check("CALLBACK", "BLOCK", "签名回调", "缺少 CI 回调密钥。", "CONFIGURE_CICD");
+        if (configuration.getCallbackVerifiedAt() == null) {
+            return check("CALLBACK", "WARN", "签名回调", "密钥已保存，但尚未收到 CI 的有效签名回调；外网连通性尚未证实。", "VIEW_PIPELINES");
+        }
+        return check("CALLBACK", "PASS", "签名回调", "已收到并验证 CI 回调；历史证据不保证当前网络持续可用。", null);
     }
 
     private static CicdReadinessCheckResponse automationCheck(CicdConfigurationEntity configuration) {

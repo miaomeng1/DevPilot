@@ -23,6 +23,7 @@ web-test:
   script:
     - cd devpilot-web
     - npm ci --cache .npm --prefer-offline
+    - npm test
     - npm run type-check
     - npm run build
 

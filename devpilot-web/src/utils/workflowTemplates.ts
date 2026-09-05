@@ -116,14 +116,20 @@ on:
   push:
     branches: [${branch}]
   workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: '已通过的 push 构建 Run ID（发布原始 digest，不重新构建）'
+        required: true
+        type: string
 
 permissions:
   contents: read
   packages: write
+  actions: read
 
 concurrency:
-  group: devpilot-${applicationKey}-\${{ github.ref }}
-  cancel-in-progress: true
+  group: devpilot-${applicationKey}-\${{ github.event_name }}-\${{ github.ref }}
+  cancel-in-progress: \${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   IMAGE_REPOSITORY: ${image}
@@ -131,7 +137,7 @@ env:
 
 jobs:
   quality:
-    if: github.event.action != 'closed'
+    if: github.event.action != 'closed' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -140,7 +146,7 @@ jobs:
 ${githubQuality(options.runtime)}
 
   security:
-    if: github.event.action != 'closed'
+    if: github.event.action != 'closed' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -154,7 +160,7 @@ ${githubQuality(options.runtime)}
 
   image:
     needs: [quality, security]
-    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event_name != 'workflow_dispatch' && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -168,6 +174,7 @@ ${githubQuality(options.runtime)}
           username: \${{ github.actor }}
           password: \${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -176,32 +183,79 @@ ${githubQuality(options.runtime)}
           labels: org.opencontainers.image.revision=\${{ env.SOURCE_SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Record immutable release evidence
+        if: github.event_name == 'push'
+        env:
+          IMAGE_DIGEST: \${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          jq -n --arg digest "$IMAGE_DIGEST" --arg image "$IMAGE_REPOSITORY" \\
+            --arg commit "$GITHUB_SHA" --arg runId "$GITHUB_RUN_ID" \\
+            '{digest:$digest,image:$image,commit:$commit,runId:$runId}' > release.json
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: devpilot-release-${applicationKey}
+          path: release.json
+          retention-days: 90
+          if-no-files-found: error
 
   production:
-    needs: [quality, security, image]
     if: github.event_name == 'workflow_dispatch' && github.ref_name == ${branch}
     runs-on: ubuntu-24.04
     environment: production
+    permissions:
+      contents: read
+      actions: read
     concurrency:
       group: production-${applicationKey}
       cancel-in-progress: false
     env:
       DEVPILOT_CICD_CALLBACK_URL: \${{ secrets.DEVPILOT_CICD_CALLBACK_URL }}
       DEVPILOT_CICD_CALLBACK_SECRET: \${{ secrets.DEVPILOT_CICD_CALLBACK_SECRET }}
-      IMAGE_URI: ${options.imageRepository.toLowerCase()}:sha-\${{ github.sha }}
+      BUILD_RUN_ID: \${{ inputs.build_run_id }}
+      GH_TOKEN: \${{ github.token }}
     steps:
+      - name: Verify successful build provenance
+        env:
+          EXPECTED_BRANCH: ${branch}
+        run: |
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > build-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > release-run.json
+          jq -e --arg branch "$EXPECTED_BRANCH" --arg repo "$GITHUB_REPOSITORY" \\
+            --slurpfile release release-run.json \\
+            '.event == "push" and .status == "completed" and .conclusion == "success" and
+             .head_branch == $branch and .repository.full_name == $repo and
+             .workflow_id == $release[0].workflow_id' build-run.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: devpilot-release-${applicationKey}
+          path: verified-release
+          run-id: \${{ inputs.build_run_id }}
+          github-token: \${{ github.token }}
+      - name: Validate immutable image evidence
+        run: |
+          jq -e --arg image "$IMAGE_REPOSITORY" --arg run "$BUILD_RUN_ID" \\
+            --arg commit "$(jq -r .head_sha build-run.json)" \\
+            '.image == $image and .runId == $run and .commit == $commit and
+             (.digest | test("^sha256:[a-f0-9]{64}$"))' verified-release/release.json
+          echo "IMAGE_URI=$IMAGE_REPOSITORY@$(jq -r .digest verified-release/release.json)" >> "$GITHUB_ENV"
+          echo "IMAGE_DIGEST=$(jq -r .digest verified-release/release.json)" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$(jq -r .commit verified-release/release.json)" >> "$GITHUB_ENV"
       - name: Send signed deployment evidence
         env:
           CALLBACK_FALLBACK: ${callback}
         run: |
           CALLBACK_URL="\${DEVPILOT_CICD_CALLBACK_URL:-$CALLBACK_FALLBACK}"
+          test -n "$DEVPILOT_CICD_CALLBACK_SECRET" || { echo 'Missing DevPilot callback secret'; exit 1; }
           BODY="$(jq -nc \\
             --arg externalRunId "github-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}" \\
-            --arg commitSha "$GITHUB_SHA" --arg branchName "$GITHUB_REF_NAME" \\
+            --arg commitSha "$RELEASE_COMMIT" --arg branchName "$GITHUB_REF_NAME" \\
             --arg status SUCCEEDED --arg testStatus PASSED --arg securityStatus PASSED \\
-            --arg imageUri "$IMAGE_URI" \\
+            --arg imageUri "$IMAGE_URI" --arg imageDigest "$IMAGE_DIGEST" \\
             --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \\
-            --arg summary "GitHub Actions quality, security and image gates passed" \\
+            --arg summary "Verified build $BUILD_RUN_ID; releasing original image digest" \\
             '$ARGS.named')"
           SIGNATURE="$(printf '%s' "$BODY" | openssl dgst -sha256 \\
             -hmac "$DEVPILOT_CICD_CALLBACK_SECRET" | awk '{print $NF}')"
@@ -212,7 +266,7 @@ ${previewJobs}
   return {
     fileName: '.github/workflows/devpilot.yml', content,
     secrets: ['DEVPILOT_CICD_CALLBACK_URL', 'DEVPILOT_CICD_CALLBACK_SECRET', ...(options.previewEnabled ? ['DEVPILOT_PREVIEW_CALLBACK_URL', 'DEVPILOT_PREVIEW_CALLBACK_SECRET'] : [])],
-    notes: ['创建 production Environment，并按需添加 Required reviewers。', 'GITHUB_TOKEN 由 Actions 自动提供；Packages 必须允许写入。', ...(options.previewEnabled ? [`Preview 最长保留 ${options.previewTtlHours} 小时；仅为同仓库分支创建，不运行 Fork PR。`, 'Preview 使用独立密钥，切勿向临时环境注入生产 Secrets。'] : [])],
+    notes: ['先等待 push 构建成功，再 Run workflow 填写该次 build_run_id；发布原始 digest，不重新构建。', '构建凭证保留 90 天，过期后需重新构建并确认，禁止回退到可变 tag。', '创建 production Environment，并按需添加 Required reviewers。', 'GITHUB_TOKEN 由 Actions 自动提供；Packages 必须允许写入。', ...(options.previewEnabled ? [`Preview 最长保留 ${options.previewTtlHours} 小时；仅为同仓库分支创建，不运行 Fork PR。`, 'Preview 使用独立密钥，切勿向临时环境注入生产 Secrets。'] : [])],
   }
 }
 

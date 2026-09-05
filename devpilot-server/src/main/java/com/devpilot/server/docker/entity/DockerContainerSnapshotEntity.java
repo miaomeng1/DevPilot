@@ -33,6 +33,7 @@ public class DockerContainerSnapshotEntity {
     private String networkMode;
     private String composeProject;
     private String composeService;
+    private String runtimeKey;
     private String volumesJson;
     private String environmentJson;
     private Integer active;

@@ -48,6 +48,7 @@ public class ApplicationService {
     private final UserMapper userMapper;
     private final ObjectMapper objectMapper;
     private final CicdPreviewMapper previewMapper;
+    private final com.devpilot.server.cicd.onboarding.OnboardingMapper onboardingMapper;
 
     public List<ApplicationResponse> list() {
         return applicationMapper.selectAll().stream().map(this::toResponse).toList();
@@ -74,7 +75,8 @@ public class ApplicationService {
         entity.setEnvironment(request.environment());
         entity.setServerId(request.serverId());
         entity.setDeployType("DOCKER");
-        entity.setContainerSnapshotId(container.getId());
+        entity.setContainerSnapshotId(container == null ? null : container.getId());
+        entity.setRuntimeKey(container == null ? null : container.getRuntimeKey());
         entity.setCurrentVersion(trimToNull(request.currentVersion()));
         entity.setHealthCheckUrl(trimToNull(request.healthCheckUrl()));
         entity.setAccessUrl(trimToNull(request.accessUrl()));
@@ -89,7 +91,9 @@ public class ApplicationService {
 
     @Transactional
     public ApplicationResponse update(Long id, UpdateApplicationRequest request) {
+        requireOnboardingIdle(id);
         ApplicationEntity entity = require(id);
+        boolean serverChanged = !entity.getServerId().equals(request.serverId());
         DockerContainerSnapshotEntity container = validateBinding(request.serverId(), request.containerSnapshotId());
         validateUrl(request.healthCheckUrl(), "健康检查 URL");
         validateUrl(request.accessUrl(), "访问 URL");
@@ -98,7 +102,8 @@ public class ApplicationService {
         entity.setDescription(trimToNull(request.description()));
         entity.setEnvironment(request.environment());
         entity.setServerId(request.serverId());
-        entity.setContainerSnapshotId(container.getId());
+        entity.setContainerSnapshotId(container == null ? null : container.getId());
+        if (container != null) entity.setRuntimeKey(container.getRuntimeKey());
         entity.setCurrentVersion(trimToNull(request.currentVersion()));
         entity.setHealthCheckUrl(trimToNull(request.healthCheckUrl()));
         entity.setAccessUrl(trimToNull(request.accessUrl()));
@@ -111,6 +116,12 @@ public class ApplicationService {
         }
         entity.setUpdatedAt(now());
         applicationMapper.updateById(entity);
+        if (container == null) {
+            var clear = new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<ApplicationEntity>()
+                    .eq("id", id).set("container_snapshot_id", null);
+            if (serverChanged) { clear.set("runtime_key", null); entity.setRuntimeKey(null); }
+            applicationMapper.update(null, clear);
+        }
         return toResponse(entity);
     }
 
@@ -118,10 +129,18 @@ public class ApplicationService {
     public void delete(Long id) {
         ApplicationEntity application = applicationMapper.selectByIdForUpdate(id);
         if (application == null) throw BusinessException.notFound(40420, "应用不存在");
+        requireOnboardingIdle(id);
         if (previewMapper.countActive(id) > 0) {
             throw BusinessException.conflict(40956, "应用仍有活动 Preview，请先在 CI/CD 发布中心完成回收");
         }
         applicationMapper.deleteById(application.getId());
+    }
+
+    private void requireOnboardingIdle(Long id) {
+        var job = onboardingMapper.byApplication(id);
+        if (job != null && job.getStage() < 5 && !"EXPIRED".equals(job.getStatus())) {
+            throw BusinessException.conflict(40970, "应用仍有未完成的自动接入任务，请先完成任务，避免丢失远端资源关联");
+        }
     }
 
     public List<ApplicationDeploymentResponse> deployments(Long applicationId) {
@@ -215,6 +234,7 @@ public class ApplicationService {
 
     private DockerContainerSnapshotEntity validateBinding(Long serverId, Long containerSnapshotId) {
         serverNodeService.get(serverId);
+        if (containerSnapshotId == null) return null;
         DockerContainerSnapshotEntity container = containerMapper.selectActiveById(containerSnapshotId);
         if (container == null || !container.getServerId().equals(serverId)) {
             throw BusinessException.badRequest(40021, "关联容器必须存在于所选服务器");

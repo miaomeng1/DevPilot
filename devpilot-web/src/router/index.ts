@@ -76,6 +76,12 @@ const router = createRouter({
           meta: { title: '发布中心 CI/CD' },
         },
         {
+          path: 'cicd/onboarding',
+          name: 'cicd-onboarding',
+          component: () => import('@/views/OnboardingView.vue'),
+          meta: { title: '自动接入项目', roles: ['ADMIN'] },
+        },
+        {
           path: 'nginx',
           name: 'nginx',
           component: () => import('@/views/NginxView.vue'),

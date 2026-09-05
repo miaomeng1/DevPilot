@@ -71,7 +71,7 @@ const environmentTemplates = [
 const form = reactive<CicdConfigurationPayload>({
   repositoryProvider: 'GITHUB', repositoryUrl: '', branchName: 'main', deploymentProvider: 'COOLIFY', deploymentMode: 'API',
   deploymentWebhookUrl: '', providerBaseUrl: '', providerApiToken: '', providerResourceId: '',
-  autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120,
+  autoDeploy: true, productionApproval: true, autoRollback: false, healthTimeoutSeconds: 120,
   previewEnabled: false, previewUrlTemplate: '', previewTtlHours: 72,
   rotatePreviewCallbackSecret: false, rotateCallbackSecret: false,
 })
@@ -101,7 +101,7 @@ const filteredRuns = computed(() => {
     const matchesText = !needle || [run.externalRunId, run.commitSha, run.imageUri].some((value) => value?.toLowerCase().includes(needle))
     const matchesStatus = runFilter.value === 'ALL'
       || (runFilter.value === 'HEALTHY' && run.deployStatus === 'HEALTHY')
-      || (runFilter.value === 'FAILED' && ['FAILED', 'HEALTH_FAILED'].includes(run.deployStatus))
+      || (runFilter.value === 'FAILED' && ['FAILED', 'HEALTH_FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(run.deployStatus))
       || (runFilter.value === 'ACTIVE' && ['RUNNING', 'QUEUED', 'TRIGGERING', 'TRIGGERED', 'VERIFYING'].includes(run.deployStatus))
     return matchesText && matchesStatus
   })
@@ -110,7 +110,7 @@ const activeDeployments = computed(() => activity.value.filter((item) => ['TRIGG
 const deliverySteps = computed(() => {
   const run = latestRun.value
   const successful = (value: string) => ['SUCCEEDED', 'PASSED', 'HEALTHY'].includes(value)
-  const failed = (value: string) => ['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED'].includes(value)
+  const failed = (value: string) => ['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(value)
   return [
     { label: '代码提交', detail: run ? run.commitSha.slice(0, 12) : '等待 Commit', state: run ? 'done' : 'idle' },
     { label: '测试与扫描', detail: run ? `${statusLabel(run.testStatus)} · ${statusLabel(run.securityStatus)}` : 'Quality gates', state: run && successful(run.testStatus) && successful(run.securityStatus) ? 'done' : run && (failed(run.testStatus) || failed(run.securityStatus)) ? 'failed' : 'active' },
@@ -214,6 +214,8 @@ const statusLabels: Record<string, string> = {
   TRIGGERED: '已触发 TRIGGERED',
   VERIFYING: '验证中 VERIFYING',
   ROLLBACK_TRIGGERED: '回滚中 ROLLBACK',
+  ROLLED_BACK: '发布失败 · 已回滚',
+  ROLLBACK_FAILED: '回滚失败 · 需人工处理',
   RELEASE: '发布 RELEASE',
   ROLLBACK: '回滚 ROLLBACK',
   PROMOTION: '环境晋级 PROMOTION',
@@ -396,7 +398,7 @@ async function loadApplication(silent = false) {
       deploymentWebhookUrl: '',
       providerBaseUrl: '', providerApiToken: '', providerResourceId: configurationResult.providerResourceId || '',
       autoDeploy: configurationResult.autoDeploy,
-      productionApproval: configurationResult.productionApproval,
+      productionApproval: true,
       autoRollback: configurationResult.autoRollback,
       healthTimeoutSeconds: configurationResult.healthTimeoutSeconds,
       previewEnabled: configurationResult.previewEnabled,
@@ -407,7 +409,7 @@ async function loadApplication(silent = false) {
     } : {
       repositoryProvider: 'GITHUB', repositoryUrl: '', branchName: 'main', deploymentProvider: 'COOLIFY', deploymentMode: 'API',
       deploymentWebhookUrl: '', providerBaseUrl: '', providerApiToken: '', providerResourceId: '',
-      autoDeploy: true, productionApproval: true, autoRollback: true, healthTimeoutSeconds: 120,
+      autoDeploy: true, productionApproval: true, autoRollback: false, healthTimeoutSeconds: 120,
       previewEnabled: false, previewUrlTemplate: '', previewTtlHours: 72,
       rotatePreviewCallbackSecret: false, rotateCallbackSecret: false,
     })
@@ -502,12 +504,21 @@ async function refreshReadiness() {
 function readinessActionLabel(action: string | null) {
   return ({
     CONFIGURE_CICD: '打开 CI/CD 配置', CONFIGURE_APPLICATION: '检查应用配置', OPEN_SERVER: '查看服务器',
-    MANAGE_ENVIRONMENT: '管理环境变量', VIEW_PIPELINES: '查看流水线',
+    MANAGE_ENVIRONMENT: '管理环境变量', VIEW_PIPELINES: '查看流水线', VERIFY_PROVIDER: '验证平台连接',
   } as Record<string, string>)[action || ''] || ''
 }
 
 async function handleReadinessAction(action: string | null) {
   if (!action) return
+  if (action === 'VERIFY_PROVIDER') {
+    try {
+      const { apiClient } = await import('@/api/client')
+      await apiClient.post(`/cicd/onboarding/${selectedId.value}/verify`)
+      successMessage.value = '已验证平台连接与应用 ID'
+    } catch (error) { errorMessage.value = apiErrorMessage(error, '平台连接验证失败') }
+    await refreshReadiness()
+    return
+  }
   if (action === 'CONFIGURE_APPLICATION') return router.push(`/applications/${selectedId.value}`)
   if (action === 'OPEN_SERVER') return router.push(`/servers/${selectedApp.value?.serverId || ''}`)
   if (action === 'CONFIGURE_CICD') configurationExpanded.value = true
@@ -547,7 +558,7 @@ function environmentStatusLabel(status: ApplicationEnvironment['syncStatus'] | u
 
 function tone(value: string) {
   if (['SUCCEEDED', 'PASSED', 'HEALTHY', 'READY'].includes(value)) return 'success'
-  if (['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'CLEANUP_FAILED'].includes(value)) return 'danger'
+  if (['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'CLEANUP_FAILED', 'ROLLBACK_FAILED'].includes(value)) return 'danger'
   if (['RUNNING', 'QUEUED', 'TRIGGERING', 'TRIGGERED', 'VERIFYING', 'DEPLOYING'].includes(value)) return 'running'
   return 'neutral'
 }
@@ -572,7 +583,8 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 
     <p v-if="errorMessage" class="form-error"><span>!</span>{{ errorMessage }}</p>
     <p v-if="successMessage" class="cicd-success">{{ successMessage }}</p>
-    <div v-if="!applications.length && !loading" class="empty-panel"><strong>暂无应用 No applications</strong><p>请先创建并绑定应用，再配置 CI/CD。</p></div>
+    <RouterLink v-if="auth.hasAnyRole(['ADMIN'])" to="/cicd/onboarding" class="cicd-success">＋ 自动接入新项目 · 自动创建部署目标、Secrets 和流水线 PR/MR →</RouterLink>
+    <div v-if="!applications.length && !loading" class="empty-panel"><strong>暂无应用 No applications</strong><p>使用自动接入向导，无需先运行业务容器。</p></div>
 
     <section v-if="activity.length" class="activity-panel">
       <header><div><span>全局发布活动 · DEPLOYMENT ACTIVITY</span><strong>最近发布与回滚</strong><small>{{ activeDeployments ? `${activeDeployments} 个任务正在执行或验证` : '当前没有进行中的发布' }}</small></div><span class="activity-live"><i />LIVE</span></header>
@@ -601,7 +613,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       <section v-if="readiness" class="readiness-panel" :class="{ ready: readiness.ready, blocked: !readiness.ready }">
         <header>
           <div class="readiness-score"><strong>{{ readiness.score }}</strong><span>/ 100</span></div>
-          <div class="readiness-title"><span>发布前检查 · RELEASE PREFLIGHT</span><strong>{{ readiness.ready ? '可以自动发布 Ready to deploy' : '暂不可自动发布 Action required' }}</strong><p>{{ readiness.summary }} · 检查于 {{ formatTime(readiness.checkedAt) }}</p></div>
+          <div class="readiness-title"><span>发布前检查 · RELEASE PREFLIGHT</span><strong>{{ !readiness.ready ? '发布被阻断 Action required' : readiness.warningCount ? '无阻断项，仍需核对 Warnings' : '检查通过，等待人工确认' }}</strong><p>{{ readiness.summary }} · 检查于 {{ formatTime(readiness.checkedAt) }}</p></div>
           <div class="readiness-summary"><b v-if="readiness.blockerCount" class="block">{{ readiness.blockerCount }} BLOCK</b><b v-if="readiness.warningCount" class="warn">{{ readiness.warningCount }} WARN</b><button type="button" :disabled="readinessRefreshing" @click="refreshReadiness">{{ readinessRefreshing ? '检查中…' : '重新检查' }}</button></div>
         </header>
         <div class="readiness-progress"><i :style="{ width: `${readiness.score}%` }" /></div>
@@ -639,7 +651,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       <section v-if="configuration && !configurationExpanded" class="connection-strip">
         <div><span>代码仓库 Repository</span><strong>{{ configuration.repositoryProvider }} · {{ configuration.branchName }}</strong><small>{{ configuration.repositoryUrl }}</small></div>
         <div><span>部署平台 Provider</span><strong>{{ configuration.deploymentProvider }} · {{ configuration.deploymentMode }}</strong><small>资源 {{ configuration.providerResourceId || 'Provider managed' }}</small></div>
-        <div><span>安全策略 Policy</span><strong>{{ configuration.productionApproval ? '生产审批开启' : '无需生产审批' }}</strong><small>{{ configuration.autoRollback ? '自动回滚已开启' : '自动回滚已关闭' }}</small></div>
+        <div><span>安全策略 Policy</span><strong>人工确认发布 · CI 平台</strong><small>{{ configuration.autoRollback ? '自动回滚已开启' : '自动回滚已关闭' }}</small></div>
         <div class="drift-state" :class="imageDrift.state"><span>运行一致性 Runtime drift</span><strong>{{ imageDrift.label }}</strong><small :title="imageDrift.detail">{{ imageDrift.detail }}</small></div>
         <button type="button" @click="configurationExpanded = true">编辑配置</button>
       </section>
@@ -775,7 +787,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             </template>
             <label v-else class="wide"><span>部署回调 Webhook</span><input v-model="form.deploymentWebhookUrl" type="url" :placeholder="configuration?.deploymentWebhookConfigured ? '留空以保留加密值' : 'Webhook 模式必填'" maxlength="4000" /><small>URL 会加密保存，API 不会再次返回明文。</small></label>
             <label class="check"><input v-model="form.autoDeploy" type="checkbox" /><span>仅在测试和安全扫描通过后自动部署 Auto deploy</span></label>
-            <label class="check"><input v-model="form.productionApproval" type="checkbox" /><span>生产环境需要 CI 平台审批 Production approval</span></label>
+            <p class="check">生产发布保留人工确认 · 在 CI 平台运行生产任务；不会因打开自动部署而跳过确认。</p>
             <label class="check"><input v-model="form.autoRollback" type="checkbox" /><span>健康检查失败时自动回滚最新健康镜像 Auto rollback</span></label>
             <label><span>健康超时 Health timeout（秒）</span><input v-model.number="form.healthTimeoutSeconds" type="number" min="30" max="1800" required /></label>
             <label class="check wide preview-enable"><input v-model="form.previewEnabled" type="checkbox" /><span>为同仓库 PR / MR 创建隔离临时环境 Managed Preview</span></label>

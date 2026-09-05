@@ -56,7 +56,7 @@ func Probe(ctx context.Context, target string, timeout time.Duration) Result {
 	}
 	if json.Unmarshal(body, &healthEnvelope) == nil && healthEnvelope.Status != "" {
 		normalized := strings.ToUpper(strings.TrimSpace(healthEnvelope.Status))
-		if normalized != "UP" && normalized != "HEALTHY" {
+		if normalized != "UP" && normalized != "HEALTHY" && normalized != "OK" {
 			result.Message = fmt.Sprintf("reported status %s", normalized)
 			return finish(started, result)
 		}

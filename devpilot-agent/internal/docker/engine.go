@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -49,6 +50,7 @@ type ContainerSnapshot struct {
 	NetworkMode    string     `json:"networkMode,omitempty"`
 	ComposeProject string     `json:"composeProject,omitempty"`
 	ComposeService string     `json:"composeService,omitempty"`
+	RuntimeKey     string     `json:"runtimeKey,omitempty"`
 	Volumes        []string   `json:"volumes"`
 	Environment    []string   `json:"environment"`
 }
@@ -95,7 +97,28 @@ func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 		result.Networks = len(networks)
 	}
 	result.Containers = e.collectContainers(ctx, containers)
+	// Swarm publishes ports on the service, not on individual task containers.
+	// Workers without manager permissions retain their container-level inventory.
+	if services, serviceErr := e.client.ServiceList(ctx, swarm.ServiceListOptions{}); serviceErr == nil {
+		appendSwarmPorts(result.Containers, services)
+	}
 	return result
+}
+
+func appendSwarmPorts(containers []ContainerSnapshot, services []swarm.Service) {
+	byRuntime := make(map[string][]string)
+	for _, service := range services {
+		for _, port := range service.Endpoint.Ports {
+			if port.PublishedPort == 0 {
+				continue
+			}
+			key := "swarm:" + service.Spec.Name
+			byRuntime[key] = append(byRuntime[key], fmt.Sprintf("Swarm %s :%d→%d/%s", port.PublishMode, port.PublishedPort, port.TargetPort, port.Protocol))
+		}
+	}
+	for i := range containers {
+		containers[i].Ports = append(containers[i].Ports, byRuntime[containers[i].RuntimeKey]...)
+	}
 }
 
 func (e *Engine) Execute(ctx context.Context, containerID, action string) error {
@@ -230,6 +253,7 @@ func (e *Engine) collectContainer(ctx context.Context, summary container.Summary
 	}
 	snapshot.ComposeProject = strings.TrimSpace(summary.Labels["com.docker.compose.project"])
 	snapshot.ComposeService = strings.TrimSpace(summary.Labels["com.docker.compose.service"])
+	snapshot.RuntimeKey = runtimeKey(summary.Labels, snapshot.Name)
 	if summary.NetworkSettings != nil {
 		for _, endpoint := range summary.NetworkSettings.Networks {
 			if endpoint != nil && endpoint.IPAddress != "" {
@@ -251,6 +275,9 @@ func (e *Engine) collectContainer(ctx context.Context, summary container.Summary
 			}
 		}
 		if inspect.Config != nil {
+			if inspect.Config.Image != "" {
+				snapshot.Image = inspect.Config.Image
+			}
 			snapshot.Environment = maskEnvironment(inspect.Config.Env)
 		}
 		for _, mount := range inspect.Mounts {

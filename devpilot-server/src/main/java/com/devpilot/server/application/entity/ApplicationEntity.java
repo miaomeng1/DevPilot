@@ -18,6 +18,7 @@ public class ApplicationEntity {
     private Long serverId;
     private String deployType;
     private Long containerSnapshotId;
+    private String runtimeKey;
     private String currentVersion;
     private String healthCheckUrl;
     private String accessUrl;

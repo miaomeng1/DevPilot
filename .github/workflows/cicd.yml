@@ -46,7 +46,7 @@ jobs:
         run: mvn -B test
       - name: Web type-check and build
         working-directory: devpilot-web
-        run: npm ci && npm run type-check && npm run build
+        run: npm ci && npm test && npm run type-check && npm run build
       - name: Agent tests
         working-directory: devpilot-agent
         run: go test -race ./...
@@ -152,7 +152,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq openssl
       - name: DevPilot callback is not configured
         if: env.DEVPILOT_CICD_CALLBACK_URL == '' || env.DEVPILOT_CICD_CALLBACK_SECRET == ''
-        run: echo "Skipping DevPilot callback until both protected environment secrets are configured."
+        run: |
+          echo "::error::Production release requires both DevPilot callback secrets. No deployment was requested."
+          exit 1
       - name: Report result to DevPilot
         if: env.DEVPILOT_CICD_CALLBACK_URL != '' && env.DEVPILOT_CICD_CALLBACK_SECRET != ''
         env:
