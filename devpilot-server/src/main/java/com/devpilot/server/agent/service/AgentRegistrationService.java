@@ -48,6 +48,12 @@ public class AgentRegistrationService {
                 || agentTokenMapper.touchActive(token.getId(), now) != 1) {
             throw BusinessException.unauthorized("Agent Token 已失效或服务器已被删除");
         }
+        if (request.listeningTcpPorts() != null) {
+            String ports = request.listeningTcpPorts().stream().distinct().sorted().map(String::valueOf)
+                    .collect(java.util.stream.Collectors.joining(","));
+            serverNodeMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<ServerNodeEntity>()
+                    .eq("id", token.getServerId()).set("listening_tcp_ports", ports).set("ports_collected_at", now));
+        }
         return new AgentHeartbeatResponse(token.getServerId(), "ONLINE",
                 properties.heartbeatInterval().toSeconds(), settingsService.metricIntervalSeconds(), now);
     }

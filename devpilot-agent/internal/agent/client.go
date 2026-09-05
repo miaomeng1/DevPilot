@@ -134,8 +134,9 @@ func (c *Client) Register(ctx context.Context, snapshot host.Snapshot) (Registra
 
 func (c *Client) Heartbeat(ctx context.Context) (Heartbeat, error) {
 	payload := struct {
-		AgentVersion string `json:"agentVersion"`
-	}{AgentVersion: c.version}
+		AgentVersion      string `json:"agentVersion"`
+		ListeningTCPPorts []int  `json:"listeningTcpPorts"`
+	}{AgentVersion: c.version, ListeningTCPPorts: host.ListeningTCPPorts()}
 	return doJSON[Heartbeat](ctx, c, http.MethodPost, "/api/agent/heartbeat", payload, true)
 }
 

@@ -26,6 +26,7 @@ public class OnboardingService {
     private final CicdService cicd;
     private final RepositoryOnboardingClient repositories;
     private final ProviderOnboardingClient providers;
+    private final HostPortPreflight hostPorts;
     private final SensitiveSettingCipher cipher;
     private final ObjectMapper json;
 
@@ -100,6 +101,7 @@ public class OnboardingService {
                         throw new IllegalArgumentException("所选部署服务器不可访问");
                     }
                     providers.checkPublishedPort(request);
+                    hostPorts.check(app.getServerId(), request.hostPort());
                 }
                 case 1 -> {
                     var targetRequest = request;

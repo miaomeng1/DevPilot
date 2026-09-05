@@ -914,6 +914,8 @@ class CicdIntegrationTests {
         org.junit.jupiter.api.Assertions.assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_onboarding", Integer.class));
         String stored = jdbcTemplate.queryForObject("SELECT request_cipher FROM cicd_onboarding", String.class);
         org.junit.jupiter.api.Assertions.assertFalse(stored.contains("repository-secret"));
+        jdbcTemplate.update("UPDATE server_node SET listening_tcp_ports = '', ports_collected_at = ?, agent_status = 'ONLINE'",
+                LocalDateTime.now(ZoneOffset.UTC));
         for (int stage = 0; stage < 3; stage++) {
             mockMvc.perform(post("/api/cicd/onboarding/{id}/advance", fixture.applicationId())
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk());

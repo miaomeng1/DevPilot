@@ -112,9 +112,14 @@ class ServerAgentIntegrationTests {
         mockMvc.perform(post("/api/agent/heartbeat")
                         .header("X-DevPilot-Agent-Token", agentToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agentVersion\":\"1.0.1\"}"))
+                        .content("{\"agentVersion\":\"1.0.1\",\"listeningTcpPorts\":[8080,80,8080]}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status", is("ONLINE")));
+
+        org.junit.jupiter.api.Assertions.assertEquals("80,8080", jdbcTemplate.queryForObject(
+                "SELECT listening_tcp_ports FROM server_node WHERE id = ?", String.class, Long.valueOf(serverId)));
+        org.junit.jupiter.api.Assertions.assertNotNull(jdbcTemplate.queryForObject(
+                "SELECT ports_collected_at FROM server_node WHERE id = ?", LocalDateTime.class, Long.valueOf(serverId)));
 
         mockMvc.perform(get("/api/servers/{id}", serverId)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))

@@ -24,6 +24,8 @@ public class ServerNodeEntity {
     private Long diskTotal;
     private String agentVersion;
     private String agentStatus;
+    private String listeningTcpPorts;
+    private LocalDateTime portsCollectedAt;
     private LocalDateTime lastHeartbeat;
     private LocalDateTime registeredAt;
     private Long createdBy;
@@ -32,4 +34,3 @@ public class ServerNodeEntity {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }
-
