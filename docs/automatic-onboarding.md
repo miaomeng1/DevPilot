@@ -19,6 +19,7 @@ GitHub 构建凭证保存 90 天，包含镜像摘要、仓库路径、提交和
 ## 接入范围与必要输入
 
 - 当前向导面向根目录有 Dockerfile 的单服务仓库，支持 npm、Maven、Go 或 Dockerfile `test` stage 测试入口。业务启动命令、数据库迁移、数据卷和多服务依赖不是可以安全猜测的配置，需先在项目中定义。
+- npm 项目在创建部署资源前检查非空 `scripts.test` 和有效 JSON 格式的 `package-lock.json`（含 `lockfileVersion`）；锁文件与依赖是否一致、测试是否有效仍由 `npm ci` / `npm test` 判定。使用 pnpm/yarn 的项目可自行提供 Dockerfile `test` stage，向导不擅自更换包管理器。
 - 目标服务器必须已经安装 Docker、部署平台和对应 Agent。平台目标和 Agent 必须是同一台业务机器；界面明确要求确认。
 - 服务器端口将被发布为 TCP 端口；请检查端口占用和防火墙。域名、DNS、TLS 与外部数据库账号需要用户提供或提前准备。
 - GitHub 使用 GHCR；GitLab 使用该实例的 Container Registry。新包不会被自动公开，既有 GHCR 包的 Actions 写权限仍受 GitHub 权限模型约束。

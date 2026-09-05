@@ -54,14 +54,38 @@ public class RepositoryOnboardingClient {
         Repository result = new Repository(api, path, branch, image, "", "DOCKER", url);
         String docker = file(provider, token, result, "Dockerfile", branch);
         if (docker == null) throw new IllegalArgumentException("仓库根目录缺少 Dockerfile；请先提供可运行的容器构建定义，系统不会猜测启动命令");
-        String runtime = docker.matches("(?is).*\\bAS\\s+test\\b.*") ? "DOCKER"
+        boolean dockerTest = java.util.regex.Pattern.compile("(?im)^\\s*FROM\\s+[^\\r\\n]+\\s+AS\\s+test\\s*(?:#.*)?$").matcher(docker).find();
+        String runtime = dockerTest ? "DOCKER"
                 : file(provider, token, result, "package.json", branch) != null ? "NODE"
                 : file(provider, token, result, "pom.xml", branch) != null ? "JAVA"
                 : file(provider, token, result, "go.mod", branch) != null ? "GO" : "DOCKER";
-        if (runtime.equals("DOCKER") && !docker.matches("(?is).*\\bAS\\s+test\\b.*")) {
+        if (runtime.equals("DOCKER") && !dockerTest) {
             throw new IllegalArgumentException("未识别测试入口；Dockerfile 需要 test stage，或使用 Node/Maven/Go 项目");
         }
+        if (runtime.equals("NODE")) {
+            validateNodeTests(file(provider, token, result, "package.json", branch),
+                    file(provider, token, result, "package-lock.json", branch));
+        }
         return new Repository(api, path, branch, image, docker, runtime, url);
+    }
+
+    static void validateNodeTests(String manifest, String lockfile) {
+        try {
+            JsonNode pkg = new com.fasterxml.jackson.databind.ObjectMapper().readTree(manifest);
+            JsonNode script = pkg.path("scripts").path("test");
+            if (!script.isTextual() || script.asText().isBlank()) {
+                throw new IllegalArgumentException("Node 项目缺少非空 scripts.test；请先配置 npm test 测试入口");
+            }
+            if (lockfile == null || lockfile.isBlank()) {
+                throw new IllegalArgumentException("Node 流水线使用 npm ci，需要提交 package-lock.json；其他包管理器请提供 Docker test stage");
+            }
+            JsonNode lock = new com.fasterxml.jackson.databind.ObjectMapper().readTree(lockfile);
+            if (!lock.isObject() || !lock.path("lockfileVersion").isIntegralNumber()) {
+                throw new IllegalArgumentException("package-lock.json 缺少有效 lockfileVersion，请重新生成并提交");
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalArgumentException("package.json 或 package-lock.json 不是有效 JSON，请修复后重新检测");
+        }
     }
 
     public String file(String provider, String token, Repository repo, String path, String branch) {

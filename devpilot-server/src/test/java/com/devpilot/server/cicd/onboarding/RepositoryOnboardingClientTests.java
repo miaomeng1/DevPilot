@@ -11,6 +11,18 @@ import org.junit.jupiter.api.Test;
 
 class RepositoryOnboardingClientTests {
     @Test
+    void nodePreflightRequiresTestScriptAndNpmLockfile() {
+        String manifest = "{\"scripts\":{\"test\":\"node --test\"}}";
+        String lock = "{\"lockfileVersion\":3}";
+        assertDoesNotThrow(() -> RepositoryOnboardingClient.validateNodeTests(manifest, lock));
+        assertThrows(IllegalArgumentException.class, () -> RepositoryOnboardingClient.validateNodeTests("{}", lock));
+        assertThrows(IllegalArgumentException.class, () -> RepositoryOnboardingClient.validateNodeTests("{\"scripts\":{\"test\":\" \"}}", lock));
+        assertThrows(IllegalArgumentException.class, () -> RepositoryOnboardingClient.validateNodeTests(manifest, null));
+        assertThrows(IllegalArgumentException.class, () -> RepositoryOnboardingClient.validateNodeTests(manifest, "{}"));
+        assertThrows(IllegalArgumentException.class, () -> RepositoryOnboardingClient.validateNodeTests("broken", lock));
+    }
+
+    @Test
     void githubInspectionStopsAtLowQuotaOrKnownReadOnlyAccess() throws Exception {
         var http = mock(OnboardingHttpClient.class);
         var json = new ObjectMapper();
