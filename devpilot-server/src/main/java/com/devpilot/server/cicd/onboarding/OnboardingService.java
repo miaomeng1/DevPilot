@@ -64,6 +64,9 @@ public class OnboardingService {
             if (repositoryToken != null && !repositoryToken.isBlank()) payload.put("repositoryToken", repositoryToken);
             if (providerApiToken != null && !providerApiToken.isBlank()) payload.put("providerApiToken", providerApiToken);
             if (registryPassword != null && !registryPassword.isBlank()) payload.put("registryPassword", registryPassword);
+            if (job.getStage() >= 3 && registryPassword != null && !registryPassword.isBlank()) {
+                providers.refreshRegistryCredentials(json.treeToValue(payload, OnboardingRequest.class), job.getResourceId());
+            }
             jobs.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<OnboardingJob>()
                     .eq("id", job.getId()).set("request_cipher", cipher.encrypt(payload.toString()))
                     .set("status", "PENDING").set("error_message", null).set("updated_at", now()));

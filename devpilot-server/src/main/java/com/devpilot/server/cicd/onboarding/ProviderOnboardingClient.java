@@ -141,6 +141,25 @@ public class ProviderOnboardingClient {
         return new Application(id, key);
     }
 
+    public void refreshRegistryCredentials(OnboardingRequest request, String resourceId) {
+        if (!"DOKPLOY".equals(request.deploymentProvider())) {
+            throw new IllegalArgumentException("该平台不支持逐应用更新镜像拉取凭据");
+        }
+        if (blankToNull(request.registryUsername()) == null || blankToNull(request.registryPassword()) == null) {
+            throw new IllegalArgumentException("更新拉取凭据需要已有 Registry 用户名和新的密码");
+        }
+        String root = OnboardingHttpClient.origin(request.providerBaseUrl(), false);
+        JsonNode app = verify("DOKPLOY", root, request.providerApiToken(), resourceId);
+        String image = app.path("dockerImage").asText("");
+        if (image.isBlank()) throw new IllegalArgumentException("无法确认部署平台当前镜像，未修改拉取凭据");
+        var body = new LinkedHashMap<String, Object>();
+        body.put("applicationId", resourceId); body.put("dockerImage", image);
+        body.put("username", blankToNull(request.registryUsername()));
+        body.put("password", blankToNull(request.registryPassword()));
+        body.put("registryUrl", "https://" + request.imageRepository().split("/")[0]);
+        http.call("DOKPLOY", request.providerApiToken(), "POST", root + "/api/application.saveDockerProvider", body);
+    }
+
     public void configure(OnboardingRequest request, String resourceId) {
         String provider = request.deploymentProvider(), token = request.providerApiToken();
         String root = OnboardingHttpClient.origin(request.providerBaseUrl(), false);

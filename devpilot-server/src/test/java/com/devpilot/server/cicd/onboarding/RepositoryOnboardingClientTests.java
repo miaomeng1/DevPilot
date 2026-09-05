@@ -11,6 +11,26 @@ import org.junit.jupiter.api.Test;
 
 class RepositoryOnboardingClientTests {
     @Test
+    void refreshedRegistryPasswordDoesNotResetDeployedDigestOrCreateResources() throws Exception {
+        var http = mock(OnboardingHttpClient.class);
+        var request = mock(OnboardingRequest.class);
+        when(request.deploymentProvider()).thenReturn("DOKPLOY");
+        when(request.providerBaseUrl()).thenReturn("https://deploy.example");
+        when(request.providerApiToken()).thenReturn("new-key");
+        when(request.registryUsername()).thenReturn("owner");
+        when(request.registryPassword()).thenReturn("new-password");
+        when(request.imageRepository()).thenReturn("ghcr.io/acme/demo");
+        String digest = "ghcr.io/acme/demo@sha256:" + "a".repeat(64);
+        when(http.call("DOKPLOY", "new-key", "GET", "https://deploy.example/api/application.one?applicationId=app1", null))
+                .thenReturn(new ObjectMapper().createObjectNode().put("applicationId", "app1").put("dockerImage", digest));
+        new ProviderOnboardingClient(http).refreshRegistryCredentials(request, "app1");
+        verify(http).call("DOKPLOY", "new-key", "GET", "https://deploy.example/api/application.one?applicationId=app1", null);
+        verify(http).call("DOKPLOY", "new-key", "POST", "https://deploy.example/api/application.saveDockerProvider",
+                Map.of("applicationId", "app1", "dockerImage", digest, "username", "owner", "password", "new-password", "registryUrl", "https://ghcr.io"));
+        verifyNoMoreInteractions(http);
+    }
+
+    @Test
     void nodePreflightRequiresTestScriptAndNpmLockfile() {
         String manifest = "{\"scripts\":{\"test\":\"node --test\"}}";
         String lock = "{\"lockfileVersion\":3}";

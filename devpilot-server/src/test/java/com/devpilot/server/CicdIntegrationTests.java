@@ -923,6 +923,14 @@ class CicdIntegrationTests {
         for (int stage = 2; stage < 5; stage++) {
             mockMvc.perform(post("/api/cicd/onboarding/{id}/advance", fixture.applicationId())
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk());
+            if (stage == 2) {
+                mockMvc.perform(put("/api/cicd/onboarding/{id}/credentials", fixture.applicationId())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"registryPassword\":\"replacement-password\"}"))
+                        .andExpect(status().isOk()).andExpect(jsonPath("$.data.stage", is(3)));
+                verify(onboardingProviders).refreshRegistryCredentials(org.mockito.ArgumentMatchers.argThat(
+                        changed -> "replacement-password".equals(changed.registryPassword())), org.mockito.ArgumentMatchers.eq("app1"));
+            }
         }
         mockMvc.perform(get("/api/cicd/onboarding/{id}", fixture.applicationId())
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())).andExpect(status().isOk())
