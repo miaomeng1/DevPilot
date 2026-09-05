@@ -11,6 +11,25 @@ import org.junit.jupiter.api.Test;
 
 class RepositoryOnboardingClientTests {
     @Test
+    void githubInspectionStopsAtLowQuotaOrKnownReadOnlyAccess() throws Exception {
+        var http = mock(OnboardingHttpClient.class);
+        var json = new ObjectMapper();
+        var client = new RepositoryOnboardingClient(http);
+        when(http.call("GITHUB", "token", "GET", "https://api.github.com/rate_limit", null))
+                .thenReturn(json.readTree("{\"resources\":{\"core\":{\"remaining\":10}}}"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> client.inspect("GITHUB", "https://github.com/acme/demo", "token")).getMessage().contains("配额"));
+        verify(http, never()).call("GITHUB", "token", "GET", "https://api.github.com/repos/acme/demo", null);
+        when(http.call("GITHUB", "token", "GET", "https://api.github.com/rate_limit", null))
+                .thenReturn(json.readTree("{\"resources\":{\"core\":{\"remaining\":5000}}}"));
+        when(http.call("GITHUB", "token", "GET", "https://api.github.com/repos/acme/demo", null))
+                .thenReturn(json.readTree("{\"permissions\":{\"push\":false}}"));
+        assertTrue(assertThrows(IllegalArgumentException.class,
+                () -> client.inspect("GITHUB", "https://github.com/acme/demo", "token")).getMessage().contains("写入权限"));
+        verify(http, never()).optional(anyString(), anyString(), anyString());
+    }
+
+    @Test
     void portPreflightRejectsCollisionOnSelectedServerOnly() throws Exception {
         var http = mock(OnboardingHttpClient.class);
         var json = new ObjectMapper();

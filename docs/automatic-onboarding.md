@@ -32,6 +32,8 @@ GitHub 构建凭证保存 90 天，包含镜像摘要、仓库路径、提交和
 
 仓库 Token 需要创建分支、提交 workflow、创建 PR/MR、管理生产环境 Secrets 的权限。GitHub 细粒度 Token 至少涉及 Contents、Workflows、Pull requests、Environments 和 Secrets 写权限；GitLab 使用具有相应项目权限的 `api` Token。
 
+GitHub 检测会只读查询当前 REST core 剩余配额，少于 40 次或无法确认时停止；若仓库明确返回没有 push 权限，也会提前拒绝。该检查不是配额预留，不能保证后续不受二级限流影响，也不能证明细粒度 Token 的所有写权限。Dokploy Key 配额仍需按下述要求确认。
+
 Dokploy API Key 还需要足够的请求配额：v0.30.3 默认可能只有每天 10 次请求，耗尽后返回 401，而非 429。自动接入和持续部署轮询会超过该配额；创建 Key 时应设置适当限流及有效期。若读取成功后很快出现 401，请同时检查平台日志中的 `Rate limit exceeded`，不要仅重复更换密码。
 
 接入参数使用现有 AES-GCM 主密钥加密；API 不回传凭据；审计记录脱敏 Token、Registry 密码、业务变量和 workflow 正文。成功创建 PR/MR 后清除暂存的仓库凭据。未完成任务的暂存凭据在 24 小时后由每小时运行的清理任务清除，状态变为 `EXPIRED`。

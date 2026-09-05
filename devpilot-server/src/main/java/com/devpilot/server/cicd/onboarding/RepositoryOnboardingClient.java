@@ -30,7 +30,19 @@ public class RepositoryOnboardingClient {
             throw new IllegalArgumentException("GitHub 自动接入当前使用 github.com 仓库地址");
         }
         String api = github ? "https://api.github.com/repos/" + path : origin + "/api/v4/projects/" + encode(path);
+        if (github) {
+            JsonNode quota = http.call(provider, token, "GET", "https://api.github.com/rate_limit", null)
+                    .path("resources").path("core");
+            // Leave a conservative budget for reads, secret writes and the workflow PR.
+            // This is a point-in-time check, not a reservation or a secondary-limit guarantee.
+            if (!quota.path("remaining").isIntegralNumber() || quota.path("remaining").asLong() < 40) {
+                throw new IllegalArgumentException("GitHub API 剩余配额不足或无法确认（接入预检至少需要 40 次）；请等待配额恢复后重试当前步骤");
+            }
+        }
         JsonNode repo = http.call(provider, token, "GET", api, null);
+        if (github && repo.path("permissions").has("push") && !repo.path("permissions").path("push").asBoolean()) {
+            throw new IllegalArgumentException("当前 GitHub 身份没有仓库写入权限，无法创建流水线 PR；请由仓库管理员授权");
+        }
         if (repo.path("archived").asBoolean() || repo.path("empty_repo").asBoolean()) {
             throw new IllegalArgumentException("归档或空仓库不能接入，请先提交业务代码");
         }
