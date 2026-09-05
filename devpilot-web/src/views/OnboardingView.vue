@@ -24,7 +24,8 @@ const form = reactive({
   containerPort: 8080, hostPort: 18081, healthPath: '/health', imageRepository: '', branch: '',
   registryUsername: '', registryPassword: '',
 })
-const steps = ['检查仓库与平台权限', '创建部署应用', '配置端口、变量和发布目标', '加密写入 CI Secrets', '提交流水线 PR / MR']
+const steps = ['仓库、必要权限与端口预检', '创建部署应用', '配置端口、变量和发布目标', '加密写入 CI Secrets', '提交流水线 PR / MR']
+const jobStatus: Record<string, string> = { PENDING: '等待执行 Pending', FAILED: '失败 · 可重试', EXPIRED: '授权已过期', AWAITING_MERGE: '待审阅合并', RUNNING: '执行中 Running' }
 const workflow = computed(() => !inspection.value ? null : generateWorkflow({
   provider: form.repositoryProvider, runtime: runtime.value, branch: form.branch, imageRepository: form.imageRepository,
   applicationCode: form.code, callbackUrl: `${form.publicBaseUrl.replace(/\/+$/, '')}/api/cicd/webhooks/${form.code}`,
@@ -121,7 +122,8 @@ onBeforeUnmount(() => { mounted = false; form.repositoryToken = ''; form.provide
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <section v-if="job" class="card progress" aria-live="polite">
       <h2>{{ job.status === 'AWAITING_MERGE' ? '配置已提交，等待审阅合并' : '接入进度' }}</h2>
-      <ol><li v-for="(step, index) in steps" :key="step" :class="{ done: job.stage > index, active: job.stage === index }"><b>{{ job.stage > index ? '✓' : index + 1 }}</b><span>{{ step }}</span><small>{{ job.stage > index ? '完成' : job.stage === index ? job.status : '等待' }}</small></li></ol>
+      <ol><li v-for="(step, index) in steps" :key="step" :class="{ done: job.stage > index, active: job.stage === index }"><b>{{ job.stage > index ? '✓' : index + 1 }}</b><span>{{ step }}</span><small>{{ job.stage > index ? '完成' : job.stage === index ? jobStatus[job.status] || job.status : '等待' }}</small></li></ol>
+      <p class="verification-note">步骤完成不代表全面就绪：平台剩余配额与细粒度授权范围可能无法自动读取；实际构建、签名回调、目标镜像和新鲜健康检查通过后，才算交付成功。</p>
       <p v-if="job.errorMessage" class="error">{{ job.errorMessage }}</p>
       <details v-if="job.status === 'FAILED'"><summary>授权失效？更新凭据（留空表示不修改）</summary><div class="grid">
         <label>仓库 Token<input v-model="form.repositoryToken" type="password" autocomplete="off" /></label>
@@ -151,13 +153,19 @@ onBeforeUnmount(() => { mounted = false; form.repositoryToken = ''; form.provide
         <button v-else :disabled="busy" @click="inspection = null; confirmed = false">修改连接</button>
       </section>
       <section v-if="inspection" class="card"><h2>2 · 确认运行参数</h2>
+        <aside class="verification-note" aria-label="预检范围与待确认事项">
+          <strong>已识别项目，不等于全部就绪</strong>
+          <p>当前仅确认仓库可读取、项目类型和部署目标列表。开始接入后才会检查必要权限及目标机端口；请确保新版 Agent 在目标宿主机网络中运行。</p>
+          <p v-if="form.deploymentProvider === 'DOKPLOY'">待人工确认 · Dokploy Key 剩余配额无法通过普通 API Key 自动读取。请在平台核对限流和有效期；每天 10 次的限制不足以支持接入和部署轮询。DevPilot 不会自动提高配额或扩大权限。</p>
+          <p v-else>待人工确认 · Coolify 私有镜像拉取凭据和平台配额需在目标平台配置，该路径尚未完成真实端到端验收。</p>
+        </aside>
         <div class="grid">
           <label>应用名称<input v-model.trim="form.name" /></label><label>应用编码<input v-model.trim="form.code" pattern="[a-z][a-z0-9-]{1,63}" /></label>
           <label>Agent 所在业务服务器<select v-model="form.serverId"><option value="">请选择</option><option v-for="server in servers.servers" :key="server.id" :value="server.id">{{ server.name }} · {{ server.ip }}</option></select></label>
           <label>部署平台目标服务器<select v-model="form.providerServerId"><option v-for="server in inspection.provider.servers" :key="server.id" :value="server.id">{{ server.name }} {{ server.ip }}</option></select><small>必须与左侧 Agent 位于同一台机器；不能用控制台服务器的 Agent 代替业务服务器。</small></label>
           <label class="wide">项目 / 环境<select v-model="form.environmentId" @change="selectTarget"><option value="__new__">自动创建专用项目和生产环境（推荐）</option><option v-for="target in inspection.provider.targets" :key="target.environmentId" :value="target.environmentId">{{ target.label }}</option></select></label>
           <label>测试类型<select v-model="runtime"><option>NODE</option><option>JAVA</option><option>GO</option><option>DOCKER</option></select></label><label>发布分支<input :value="form.branch" readonly /></label>
-          <label>容器端口<input v-model.number="form.containerPort" type="number" min="1" max="65535" /></label><label>服务器端口<input v-model.number="form.hostPort" type="number" min="1024" max="65535" /><small>将发布此 TCP 端口，外网访问取决于防火墙；请确认未被其他服务占用。</small></label>
+          <label>容器内部端口 Internal<input v-model.number="form.containerPort" type="number" min="1" max="65535" /></label><label>服务器发布端口 Published<input v-model.number="form.hostPort" type="number" min="1024" max="65535" /><small>预检结合 Agent 监听端口、Docker 映射和 Dokploy 应用；需要 30 秒内的 Agent 数据。不会预留端口，外网访问仍取决于防火墙。</small></label>
           <label>健康检查路径<input v-model.trim="form.healthPath" placeholder="/health" /></label><label>镜像仓库<input v-model.trim="form.imageRepository" /></label>
           <label class="wide">DevPilot 公网 HTTPS 根地址<input v-model.trim="form.publicBaseUrl" placeholder="https://ops.example.com" /><small>不能填写 localhost。仅保存地址不代表云端 Runner 已经连通，首次回调才是连通证据。</small></label>
           <label>Registry 拉取用户名（私有镜像）<input v-model.trim="form.registryUsername" autocomplete="off" /></label><label>Registry 拉取密码 / Token<input v-model="form.registryPassword" type="password" autocomplete="off" /><small>Dokploy 可自动配置。Coolify 需服务器预先登录 Registry；不会自动公开你的镜像。</small></label>
@@ -175,5 +183,6 @@ onBeforeUnmount(() => { mounted = false; form.repositoryToken = ''; form.provide
 </template>
 
 <style scoped>
+.verification-note{border:1px solid #b88735;border-radius:9px;padding:13px 16px;background:#e9aa190a;color:var(--text);font-size:12px;line-height:1.7}.verification-note p{margin:6px 0;font-size:12px}
 .onboard-page{max-width:1050px;margin:0 auto;padding:24px;color:var(--text)}header{margin-bottom:24px}h1{font-size:26px;margin:12px 0}h1 small{font-size:14px;color:var(--muted);font-weight:400}h2{font-size:17px;margin:0 0 14px}p,small{color:var(--muted);line-height:1.65}p{font-size:13px}a{color:#568ded}.card{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:24px;margin:18px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:20px 0}.grid label{display:flex;flex-direction:column;gap:7px;font-size:13px}.wide{grid-column:1/-1}input,select,textarea{box-sizing:border-box;width:100%;border:1px solid var(--line);border-radius:7px;padding:11px;color:var(--text);background:var(--panel-solid);font:inherit}small{font-size:11px}button,.primary{display:inline-block;border:1px solid var(--line);border-radius:8px;padding:11px 16px;background:var(--panel-solid);color:var(--text);cursor:pointer;margin:8px 8px 0 0;font-size:13px;text-decoration:none}.primary{background:#2563eb;color:white;border-color:#2563eb}button:disabled{opacity:.5;cursor:not-allowed}.error{padding:12px;border:1px solid #db7474;border-radius:8px;color:#c54e4e;background:#e456560a}.consent{display:flex;gap:10px;align-items:center;margin:20px 0;font-size:13px}.consent input{width:18px;height:18px}pre{max-height:380px;overflow:auto;font-size:11px;line-height:1.6;padding:15px;background:#101827;color:#d7e1f3;border-radius:8px}summary{cursor:pointer;color:#568ded}ol{list-style:none;padding:0}li{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);font-size:13px}li b{display:grid;place-items:center;width:28px;height:28px;background:var(--panel-solid);border:1px solid var(--line);border-radius:50%}li small{margin-left:auto}.done b{color:#1b9854}.active b{background:#2563eb;color:white}@media(max-width:650px){.grid{grid-template-columns:1fr}.onboard-page{padding:12px}.card{padding:18px}}
 </style>
