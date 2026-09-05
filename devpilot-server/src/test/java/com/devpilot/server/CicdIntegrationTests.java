@@ -902,8 +902,13 @@ class CicdIntegrationTests {
                  "deploymentProvider":"DOKPLOY","providerBaseUrl":"https://deploy.example","providerApiToken":"provider-secret",
                  "projectId":"p","environmentId":"e","providerServerId":"","publicBaseUrl":"https://ops.example",
                  "containerPort":8080,"hostPort":18081,"healthPath":"/health","imageRepository":"ghcr.io/acme/demo",
-                 "branch":"main","workflowContent":"workflow_dispatch","environmentValues":{"DATABASE_PASSWORD":"runtime-secret"}}
+                 "branch":"main","workflowContent":"workflow_dispatch","providerQuotaConfirmed":true,"environmentValues":{"DATABASE_PASSWORD":"runtime-secret"}}
                 """;
+        mockMvc.perform(post("/api/cicd/onboarding/{id}", fixture.applicationId())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())
+                .contentType(MediaType.APPLICATION_JSON).content(request.replace("\"providerQuotaConfirmed\":true", "\"providerQuotaConfirmed\":false")))
+                .andExpect(status().isBadRequest());
+        org.junit.jupiter.api.Assertions.assertEquals(0, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM cicd_onboarding", Integer.class));
         for (int repeat = 0; repeat < 2; repeat++) {
             mockMvc.perform(post("/api/cicd/onboarding/{id}", fixture.applicationId())
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + fixture.accessToken())

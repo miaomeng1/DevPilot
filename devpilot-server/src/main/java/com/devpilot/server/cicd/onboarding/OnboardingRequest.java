@@ -22,6 +22,7 @@ public record OnboardingRequest(
         @Size(max = 200000) String workflowContent,
         @Size(max = 255) String registryUsername,
         @Size(max = 4000) String registryPassword,
-        @Size(max = 100) Map<@Pattern(regexp = "[A-Za-z_][A-Za-z0-9_]*") String, @Size(max = 4000) String> environmentValues) {
+        @Size(max = 100) Map<@Pattern(regexp = "[A-Za-z_][A-Za-z0-9_]*") String, @Size(max = 4000) String> environmentValues,
+        Boolean providerQuotaConfirmed) {
     @Override public String toString() { return "OnboardingRequest[REDACTED]"; }
 }

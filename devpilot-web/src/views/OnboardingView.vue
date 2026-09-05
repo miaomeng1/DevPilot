@@ -22,7 +22,7 @@ const form = reactive({
   repositoryUrl: '', repositoryToken: '', deploymentProvider: 'DOKPLOY', providerBaseUrl: '', providerApiToken: '',
   projectId: '', environmentId: '__new__', providerServerId: '', publicBaseUrl: window.location.origin,
   containerPort: 8080, hostPort: 18081, healthPath: '/health', imageRepository: '', branch: '',
-  registryUsername: '', registryPassword: '',
+  registryUsername: '', registryPassword: '', providerQuotaConfirmed: false,
 })
 const steps = ['仓库、必要权限与端口预检', '创建部署应用', '配置端口、变量和发布目标', '加密写入 CI Secrets', '提交流水线 PR / MR']
 const jobStatus: Record<string, string> = { PENDING: '等待执行 Pending', FAILED: '失败 · 可重试', EXPIRED: '授权已过期', AWAITING_MERGE: '待审阅合并', RUNNING: '执行中 Running' }
@@ -33,6 +33,7 @@ const workflow = computed(() => !inspection.value ? null : generateWorkflow({
 }))
 async function inspect() {
   busy.value = true; error.value = ''; inspection.value = null; confirmed.value = false
+  form.providerQuotaConfirmed = false
   try {
     const response = await apiClient.post<ApiResponse<Inspection>>('/cicd/onboarding/inspect', form, { timeout: 120000 })
     inspection.value = response.data.data
@@ -157,6 +158,7 @@ onBeforeUnmount(() => { mounted = false; form.repositoryToken = ''; form.provide
           <strong>已识别项目，不等于全部就绪</strong>
           <p>当前仅确认仓库可读取、项目类型和部署目标列表。开始接入后才会检查必要权限及目标机端口；请确保新版 Agent 在目标宿主机网络中运行。</p>
           <p v-if="form.deploymentProvider === 'DOKPLOY'">待人工确认 · Dokploy Key 剩余配额无法通过普通 API Key 自动读取。请在平台核对限流和有效期；每天 10 次的限制不足以支持接入和部署轮询。DevPilot 不会自动提高配额或扩大权限。</p>
+          <label v-if="form.deploymentProvider === 'DOKPLOY'" class="consent"><input v-model="form.providerQuotaConfirmed" type="checkbox" /> 我已在 Dokploy 核对当前 Key 的配额和有效期，足以支持接入与部署轮询（人工确认，非自动验证）</label>
           <p v-else>待人工确认 · Coolify 私有镜像拉取凭据和平台配额需在目标平台配置，该路径尚未完成真实端到端验收。</p>
         </aside>
         <div class="grid">
@@ -176,7 +178,7 @@ onBeforeUnmount(() => { mounted = false; form.repositoryToken = ''; form.provide
         <p>将创建一个部署应用、配置端口和变量、写入独立生产环境 Secrets，并创建流水线 PR/MR。不会直接合并、不会自动发布，也不会改变包的公开状态。</p>
         <details><summary>查看生成的流水线</summary><pre>{{ workflow?.content }}</pre></details>
         <label class="consent"><input v-model="confirmed" type="checkbox" /> 我确认目标服务器和端口，并允许执行上述配置变更</label>
-        <button class="primary" :disabled="busy || !confirmed || !form.name || !form.code || !form.serverId || !form.environmentId" @click="start">{{ busy ? '接入中…' : '自动完成接入配置 →' }}</button>
+        <button class="primary" :disabled="busy || !confirmed || !form.name || !form.code || !form.serverId || !form.environmentId || (form.deploymentProvider === 'DOKPLOY' && !form.providerQuotaConfirmed)" @click="start">{{ busy ? '接入中…' : '自动完成接入配置 →' }}</button>
       </section>
     </template>
   </main>

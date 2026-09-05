@@ -39,6 +39,8 @@ GitHub 检测会只读查询当前 REST core 剩余配额，少于 40 次或无�
 
 Dokploy API Key 还需要足够的请求配额：v0.30.3 默认可能只有每天 10 次请求，耗尽后返回 401，而非 429。自动接入和持续部署轮询会超过该配额；创建 Key 时应设置适当限流及有效期。若读取成功后很快出现 401，请同时检查平台日志中的 `Rate limit exceeded`，不要仅重复更换密码。
 
+Dokploy 配额由管理员在接入前人工确认（已接受的产品边界），不标记为自动验证。向导需要单独勾选配额与有效期确认项；后端要求 `providerQuotaConfirmed: true`，缺失或为 false 时拒绝创建接入任务。创建任务后的 Key 更换仍须管理员重新核对该 Key 的限制，旧确认不证明新 Key 的配额。
+
 Dokploy 创建资源前使用 `user.getPermissions` 检查 service、environment、server、deployment 和 envVars 的必要权限；创建专用项目时还检查 project/environment create。缺失或不能确认会停止，系统不会提升权限。这不代表资源范围限制、Key 配额或未来请求一定通过。v0.30.3 实测 API Key 请求 `/api/auth/api-key/list` 返回 401，项目响应没有配额头，因此不能自动推断剩余额度。
 
 接入参数使用现有 AES-GCM 主密钥加密；API 不回传凭据；审计记录脱敏 Token、Registry 密码、业务变量和 workflow 正文。成功创建 PR/MR 后清除暂存的仓库凭据。未完成任务的暂存凭据在 24 小时后由每小时运行的清理任务清除，状态变为 `EXPIRED`。

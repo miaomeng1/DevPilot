@@ -170,6 +170,9 @@ public class OnboardingService {
     }
 
     private void validate(OnboardingRequest request) {
+        if ("DOKPLOY".equals(request.deploymentProvider()) && !Boolean.TRUE.equals(request.providerQuotaConfirmed())) {
+            throw BusinessException.badRequest(40070, "请先在 Dokploy 核对 Key 配额和有效期，并明确确认；系统不能自动读取剩余额度");
+        }
         boolean registryUser = request.registryUsername() != null && !request.registryUsername().isBlank();
         boolean registryPassword = request.registryPassword() != null && !request.registryPassword().isBlank();
         if (registryUser != registryPassword) throw BusinessException.badRequest(40070, "Registry 用户名与密码必须一起提供");
