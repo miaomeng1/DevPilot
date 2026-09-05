@@ -93,6 +93,7 @@ public class OnboardingService {
                 case 0 -> {
                     var repo = repositories.inspect(request.repositoryProvider(), request.repositoryUrl(), request.repositoryToken());
                     if (!request.branch().equals(repo.branch())) throw new IllegalArgumentException("默认分支已变化，请重新核对接入计划");
+                    providers.checkPermissions(request);
                     var discovery = providers.discover(request.deploymentProvider(), request.providerBaseUrl(), request.providerApiToken());
                     if (!"__new__".equals(request.environmentId()) && discovery.targets().stream().noneMatch(t -> t.projectId().equals(request.projectId()) && t.environmentId().equals(request.environmentId()))) {
                         throw new IllegalArgumentException("所选项目环境不可访问，请检查部署平台授权");

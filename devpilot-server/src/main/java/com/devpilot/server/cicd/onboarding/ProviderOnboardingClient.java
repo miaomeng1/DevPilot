@@ -15,6 +15,21 @@ public class ProviderOnboardingClient {
     public record Discovery(List<Target> targets, List<Server> servers) { }
     public record Application(String id, String runtimeKey) { }
 
+    public void checkPermissions(OnboardingRequest request) {
+        if (!"DOKPLOY".equals(request.deploymentProvider())) return;
+        String root = OnboardingHttpClient.origin(request.providerBaseUrl(), false);
+        JsonNode permissions = http.call("DOKPLOY", request.providerApiToken(), "GET", root + "/api/user.getPermissions", null);
+        var required = new ArrayList<>(List.of("service.read", "service.create", "environment.read",
+                "server.read", "deployment.read", "deployment.create", "envVars.write"));
+        if ("__new__".equals(request.environmentId())) required.addAll(List.of("project.create", "environment.create"));
+        for (String permission : required) {
+            String[] pair = permission.split("\\.");
+            if (!permissions.path(pair[0]).path(pair[1]).asBoolean(false)) {
+                throw new IllegalArgumentException("Dokploy 缺少或无法确认权限 " + permission + "；请由管理员核对授权后重试");
+            }
+        }
+    }
+
     public void checkPublishedPort(OnboardingRequest request) {
         if (!"DOKPLOY".equals(request.deploymentProvider())) return;
         String root = OnboardingHttpClient.origin(request.providerBaseUrl(), false);

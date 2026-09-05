@@ -11,6 +11,25 @@ import org.junit.jupiter.api.Test;
 
 class RepositoryOnboardingClientTests {
     @Test
+    void dokployMissingPermissionsFailBeforeAnyWrite() throws Exception {
+        var http = mock(OnboardingHttpClient.class);
+        var request = mock(OnboardingRequest.class);
+        when(request.deploymentProvider()).thenReturn("DOKPLOY");
+        when(request.providerBaseUrl()).thenReturn("https://deploy.example");
+        when(request.providerApiToken()).thenReturn("key");
+        var permissions = new ObjectMapper().readTree("""
+                {"service":{"read":true,"create":true},"environment":{"read":true},
+                 "server":{"read":true},"deployment":{"read":true,"create":true},"envVars":{"write":true}}
+                """);
+        when(http.call("DOKPLOY", "key", "GET", "https://deploy.example/api/user.getPermissions", null)).thenReturn(permissions);
+        var client = new ProviderOnboardingClient(http);
+        assertDoesNotThrow(() -> client.checkPermissions(request));
+        when(request.environmentId()).thenReturn("__new__");
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> client.checkPermissions(request)).getMessage().contains("project.create"));
+        verify(http, never()).call(anyString(), anyString(), eq("POST"), anyString(), any());
+    }
+
+    @Test
     void refreshedRegistryPasswordDoesNotResetDeployedDigestOrCreateResources() throws Exception {
         var http = mock(OnboardingHttpClient.class);
         var request = mock(OnboardingRequest.class);
