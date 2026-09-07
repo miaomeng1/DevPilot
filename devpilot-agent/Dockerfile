@@ -16,7 +16,8 @@ RUN target_os="${TARGETOS:-linux}" && \
     -o /out/devpilot-agent ./cmd/devpilot-agent
 
 FROM alpine:3.22
-RUN addgroup -S devpilot && adduser -S -G devpilot devpilot
+RUN apk upgrade --no-cache && \
+    addgroup -S devpilot && adduser -S -G devpilot devpilot
 COPY --from=build /out/devpilot-agent /usr/local/bin/devpilot-agent
 COPY config.example.yaml /etc/devpilot-agent/config.yaml
 USER devpilot

@@ -219,15 +219,20 @@ jobs:
           set -euo pipefail
           mkdir -p image-reports
           IMAGE="$(jq -r '.image + "@" + .digest' release.json)"
+          scan_status=0
           for architecture in amd64 arm64; do
             docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD \
               -v "$PWD/image-reports:/reports" "aquasec/trivy:${TRIVY_VERSION}" image \
               --image-src remote --platform "linux/$architecture" --scanners vuln \
               --severity HIGH,CRITICAL --exit-code 1 --format json \
-              --output "/reports/$architecture.json" "$IMAGE"
+              --output "/reports/$architecture.json" "$IMAGE" || scan_status=1
+            if [[ -s "image-reports/$architecture.json" ]]; then
+              jq -r '.Results[]?.Vulnerabilities[]? | [.VulnerabilityID,.PkgName,.InstalledVersion,.FixedVersion] | @tsv' "image-reports/$architecture.json"
+            fi
           done
+          exit "$scan_status"
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+        if: always() && github.event_name == 'push'
         with:
           name: devpilot-image-scan-${{ matrix.component }}-${{ github.run_attempt }}
           path: image-reports/
