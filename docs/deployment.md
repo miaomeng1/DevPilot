@@ -183,6 +183,22 @@ After an isolated or staging restore, open **维护 Maintenance → 恢复演练
 
 ## Health and troubleshooting
 
+### 数据与日志保留
+
+MySQL 指标样本默认保留 7 天。发布、回滚、审计与通知历史默认不自动删除；列表分页或“最近 100 条”不是数据清理策略。定期备份并监控 MySQL/宿主磁盘容量；不要直接删除关联的历史表行来腾空间。
+
+容器日志由 Docker 管理。安装器不修改主机的全局 Docker 日志配置；若宿主未设置轮转，日志可能持续增长。生产使用前，为 DevPilot Compose 的各服务配置下列日志策略（或使用已有统一日志策略），备份后从安装目录运行 `docker compose --env-file .env -f docker-compose.yml up -d` 使变更生效；这会重建受影响容器但不删除数据卷。
+
+```yaml
+logging:
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+```
+
+以上约为每个容器 30 MB 轮转上限，不是业务日志永久归档。保留更长日志时，应发送到自有日志存储并制定独立保留周期。
+
 ### 维护操作互斥
 
 新版 install.sh、backup.sh、upgrade.sh、restore.sh、uninstall.sh 先使用主机级 `/run/devpilot-maintenance.lock`，再使用安装目录内的 `.devpilot-maintenance.lock` 和 Linux `flock`。即使两个目录指向同一 Docker Compose 项目，也不能在同一主机并发操作；为避免错误识别 Docker 目标，当前保守地串行化该主机上的全部 DevPilot 脚本维护。冲突时脚本立即非零退出并提示稍后重试，不调用 Docker、不改写配置、不开始恢复。安装预检要求 `flock`（通常由 util-linux 提供）。
