@@ -3,6 +3,7 @@ package com.devpilot.server;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -168,6 +169,131 @@ class AlertIntegrationTests {
     }
 
     @Test
+    void missingMetricEvidenceDoesNotResolveOrRepeatAnActiveAlert() throws Exception {
+        String accessToken = setupAdministrator();
+        JsonNode node = data(mockMvc.perform(post("/api/servers")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"unknown-evidence\"}"))
+                .andExpect(status().isOk()).andReturn());
+        long serverId = node.path("server").path("id").asLong();
+        String agentToken = node.path("agentToken").asText();
+        register(agentToken);
+        uploadMetric(agentToken, 98);
+        createCpuRule(accessToken, serverId, 0);
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        assertEquals(1, count("alert_notification", "transition_type = 'FIRING'"));
+
+        jdbcTemplate.update("UPDATE server_node SET agent_status = 'OFFLINE' WHERE id = ?", serverId);
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        jdbcTemplate.update("UPDATE server_node SET agent_status = 'ONLINE' WHERE id = ?", serverId);
+        for (LocalDateTime timestamp : java.util.List.of(LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5),
+                LocalDateTime.now(ZoneOffset.UTC).plusMinutes(5))) {
+            jdbcTemplate.update("UPDATE server_metric SET collected_at = ? WHERE server_id = ?", timestamp, serverId);
+            evaluationService.evaluateAll();
+            assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        }
+        jdbcTemplate.update("DELETE FROM server_metric WHERE server_id = ?", serverId);
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        assertEquals(0, count("alert_notification", "transition_type = 'RESOLVED'"));
+        uploadMetric(agentToken, 98);
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_notification", "transition_type = 'FIRING'"));
+        uploadMetric(agentToken, 20);
+        evaluationService.evaluateAll();
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'RESOLVED'"));
+        assertEquals(1, count("alert_notification", "transition_type = 'RESOLVED'"));
+    }
+
+    @Test
+    void missingSampleResetsPendingContinuousDuration() throws Exception {
+        String accessToken = setupAdministrator();
+        JsonNode node = data(mockMvc.perform(post("/api/servers")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"duration-gap\"}"))
+                .andExpect(status().isOk()).andReturn());
+        long serverId = node.path("server").path("id").asLong();
+        String agentToken = node.path("agentToken").asText();
+        register(agentToken);
+        uploadMetric(agentToken, 98);
+        createCpuRule(accessToken, serverId, 60);
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_condition_state", "1 = 1"));
+        jdbcTemplate.update("UPDATE alert_condition_state SET first_met_at = ?",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+        jdbcTemplate.update("DELETE FROM server_metric WHERE server_id = ?", serverId);
+        evaluationService.evaluateAll();
+        assertEquals(0, count("alert_condition_state", "1 = 1"));
+        uploadMetric(agentToken, 98);
+        evaluationService.evaluateAll();
+        assertEquals(0, count("alert_event", "1 = 1"));
+        assertEquals(1, count("alert_condition_state", "1 = 1"));
+    }
+
+    @Test
+    void applicationUnknownOrExpiredHealthNeitherFiresNorResolves() throws Exception {
+        String accessToken = setupAdministrator();
+        JsonNode node = data(mockMvc.perform(post("/api/servers")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"health-evidence\"}"))
+                .andExpect(status().isOk()).andReturn());
+        long serverId = node.path("server").path("id").asLong();
+        register(node.path("agentToken").asText());
+        long owner = jdbcTemplate.queryForObject("SELECT id FROM sys_user WHERE username = 'admin'", Long.class);
+        jdbcTemplate.update("""
+                INSERT INTO application (id, name, code, environment, server_id, created_by,
+                  health_status, health_checked_at) VALUES (7654321, 'Health evidence', 'health-evidence',
+                  'PRODUCTION', ?, ?, 'UNHEALTHY', ?)
+                """, serverId, owner, LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+        mockMvc.perform(post("/api/alerts/rules")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(Map.of(
+                        "name", "Health rule", "metricType", "APP_UNHEALTHY", "operator", "EQ",
+                        "threshold", 1, "durationSeconds", 0, "severity", "CRITICAL",
+                        "serverId", serverId, "enabled", true))))
+                .andExpect(status().isOk());
+        evaluationService.evaluateAll();
+        assertEquals(0, count("alert_event", "1 = 1"));
+        jdbcTemplate.update("UPDATE application SET health_checked_at = ? WHERE id = 7654321",
+                LocalDateTime.now(ZoneOffset.UTC));
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        jdbcTemplate.update("UPDATE application SET health_status = 'UNKNOWN' WHERE id = 7654321");
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        jdbcTemplate.update("UPDATE application SET health_status = 'HEALTHY', health_checked_at = ? WHERE id = 7654321",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        assertEquals(0, count("alert_notification", "transition_type = 'RESOLVED'"));
+        jdbcTemplate.update("UPDATE application SET health_checked_at = ? WHERE id = 7654321",
+                LocalDateTime.now(ZoneOffset.UTC));
+        evaluationService.evaluateAll();
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'RESOLVED'"));
+        assertEquals(1, count("alert_notification", "transition_type = 'RESOLVED'"));
+    }
+
+    private int count(String table, String predicate) {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE " + predicate, Integer.class);
+    }
+
+    private void createCpuRule(String accessToken, long serverId, int duration) throws Exception {
+        mockMvc.perform(post("/api/alerts/rules")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(Map.of(
+                        "name", "Evidence CPU rule", "metricType", "SERVER_CPU", "operator", "GT",
+                        "threshold", 90, "durationSeconds", duration, "severity", "CRITICAL",
+                        "serverId", serverId, "enabled", true))))
+                .andExpect(status().isOk());
+    }
+
+    @Test
     void containerRestartStormUsesRollingDeltaAndResolvesAfterWindow() throws Exception {
         String accessToken = setupAdministrator();
         MvcResult serverResult = mockMvc.perform(post("/api/servers")
@@ -197,6 +323,13 @@ class AlertIntegrationTests {
                 .andExpect(jsonPath("$.data[0].resourceName", is("demo")))
                 .andExpect(jsonPath("$.data[0].message", containsString("restarted 4 times within 10 minutes")));
 
+        jdbcTemplate.update("UPDATE docker_container_snapshot SET last_seen_at = ?",
+                LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5));
+        evaluationService.evaluateAll();
+        assertEquals(1, count("alert_event", "status = 'FIRING'"));
+        assertEquals(0, count("alert_notification", "transition_type = 'RESOLVED'"));
+        jdbcTemplate.update("UPDATE docker_container_snapshot SET last_seen_at = ?",
+                LocalDateTime.now(ZoneOffset.UTC));
         jdbcTemplate.update("UPDATE docker_container_snapshot SET restart_window_started_at = ?",
                 LocalDateTime.now(ZoneOffset.UTC).minusMinutes(11));
         evaluationService.evaluateAll();

@@ -157,6 +157,7 @@ public class ProviderOnboardingClient {
     }
 
     public void refreshRegistryCredentials(OnboardingRequest request, String resourceId) {
+        RegistryCredentialPolicy.validate(request.imageRepository(), request.registryPassword());
         if (!"DOKPLOY".equals(request.deploymentProvider())) {
             throw new IllegalArgumentException("该平台不支持逐应用更新镜像拉取凭据");
         }
@@ -176,33 +177,67 @@ public class ProviderOnboardingClient {
     }
 
     public void configure(OnboardingRequest request, String resourceId) {
+        RegistryCredentialPolicy.validate(request.imageRepository(), request.registryPassword());
         String provider = request.deploymentProvider(), token = request.providerApiToken();
         String root = OnboardingHttpClient.origin(request.providerBaseUrl(), false);
         Map<String, String> env = request.environmentValues() == null ? Map.of() : request.environmentValues();
         if (provider.equals("DOKPLOY")) {
-            var registry = new LinkedHashMap<String, Object>();
-            registry.put("applicationId", resourceId); registry.put("dockerImage", request.imageRepository() + ":pending-first-release");
-            registry.put("username", blankToNull(request.registryUsername())); registry.put("password", blankToNull(request.registryPassword()));
-            registry.put("registryUrl", "https://" + request.imageRepository().split("/")[0]);
-            http.call(provider, token, "POST", root + "/api/application.saveDockerProvider", registry);
+            // A previous attempt may have committed remotely before timing out.
+            // Never reset a now-configured image when resuming onboarding.
             JsonNode app = verify(provider, root, token, resourceId);
-            boolean portExists = false;
-            for (JsonNode port : app.path("ports")) {
-                if (port.path("publishedPort").asInt() == request.hostPort()
-                        && port.path("targetPort").asInt() == request.containerPort()) portExists = true;
-            }
-            if (!portExists) http.call(provider, token, "POST", root + "/api/port.create",
-                    Map.of("applicationId", resourceId, "publishedPort", request.hostPort(), "targetPort", request.containerPort(),
-                            "protocol", "tcp", "publishMode", "ingress"));
+            Map<String, Object> environmentUpdate = null;
             if (!env.isEmpty()) {
                 StringBuilder text = new StringBuilder();
                 for (var entry : env.entrySet()) {
                     if (entry.getValue().contains("\n") || entry.getValue().contains("\r")) throw new IllegalArgumentException("Dokploy 接入变量暂不接受多行值");
                     text.append(entry.getKey()).append("='").append(entry.getValue().replace("'", "\\'")).append("'\n");
                 }
-                // Only a new, job-owned app is passed here; never replace an existing user's environment.
-                http.call(provider, token, "POST", root + "/api/application.saveEnvironment",
-                        Map.of("applicationId", resourceId, "env", text.toString(), "buildArgs", "", "buildSecrets", "", "createEnvFile", false));
+                if (!app.has("env") || (!app.path("env").isNull() && !app.path("env").isTextual())) throw new IllegalArgumentException("无法读取远端环境变量，未修改配置；请核对部署平台返回字段后恢复原任务");
+                String existingEnv = app.path("env").asText("");
+                if (!existingEnv.isBlank() && !existingEnv.equals(text.toString())) {
+                    throw new IllegalArgumentException("远端环境变量与接入计划不同，未覆盖任何配置；请在 Dokploy 核对差异后恢复原任务，不要重复创建应用");
+                }
+                if (!existingEnv.equals(text.toString())) {
+                    if (!app.has("buildArgs") || (!app.path("buildArgs").isNull() && !app.path("buildArgs").isTextual())
+                            || !app.has("buildSecrets") || (!app.path("buildSecrets").isNull() && !app.path("buildSecrets").isTextual())
+                            || !app.path("createEnvFile").isBoolean()) {
+                        throw new IllegalArgumentException("无法完整读取远端构建配置，未修改环境变量；请核对部署平台版本和返回字段");
+                    }
+                    environmentUpdate = Map.of("applicationId", resourceId, "env", text.toString(),
+                            "buildArgs", app.path("buildArgs").asText(""), "buildSecrets", app.path("buildSecrets").asText(""),
+                            "createEnvFile", app.path("createEnvFile").asBoolean(false));
+                }
+            }
+            // Validate before any write, including registry credentials. A timeout retry
+            // must not treat an unreadable or externally changed mapping as absent.
+            if (!app.path("ports").isArray()) {
+                throw new IllegalArgumentException("无法读取远端端口列表，未修改配置；请核对 Dokploy 返回字段后恢复原任务");
+            }
+            boolean portExists = false;
+            for (JsonNode port : app.path("ports")) {
+                if (!port.path("publishedPort").isIntegralNumber() || !port.path("targetPort").isIntegralNumber()) {
+                    throw new IllegalArgumentException("远端端口记录格式异常，未修改配置；请在 Dokploy 核对后恢复原任务");
+                }
+                if (port.path("publishedPort").asInt() != request.hostPort()) continue;
+                if (portExists || port.path("targetPort").asInt() != request.containerPort()
+                        || !"tcp".equals(port.path("protocol").asText())
+                        || !"ingress".equals(port.path("publishMode").asText())) {
+                    throw new IllegalArgumentException("远端发布端口与接入计划冲突或重复，未修改配置；请在 Dokploy 核对目标端口、协议和发布模式后恢复原任务");
+                }
+                portExists = true;
+            }
+            String existingImage = blankToNull(app.path("dockerImage").asText(""));
+            var registry = new LinkedHashMap<String, Object>();
+            registry.put("applicationId", resourceId);
+            registry.put("dockerImage", existingImage == null ? request.imageRepository() + ":pending-first-release" : existingImage);
+            registry.put("username", blankToNull(request.registryUsername())); registry.put("password", blankToNull(request.registryPassword()));
+            registry.put("registryUrl", "https://" + request.imageRepository().split("/")[0]);
+            http.call(provider, token, "POST", root + "/api/application.saveDockerProvider", registry);
+            if (!portExists) http.call(provider, token, "POST", root + "/api/port.create",
+                    Map.of("applicationId", resourceId, "publishedPort", request.hostPort(), "targetPort", request.containerPort(),
+                            "protocol", "tcp", "publishMode", "ingress"));
+            if (environmentUpdate != null) {
+                http.call(provider, token, "POST", root + "/api/application.saveEnvironment", environmentUpdate);
             }
         } else {
             if (blankToNull(request.registryPassword()) != null) {

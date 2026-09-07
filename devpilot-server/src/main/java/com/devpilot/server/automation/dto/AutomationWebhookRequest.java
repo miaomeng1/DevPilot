@@ -9,5 +9,5 @@ import java.util.List;
 public record AutomationWebhookRequest(
         @NotBlank @Size(max = 120) String name,
         @NotBlank @Size(max = 2000) String endpointUrl,
-        @NotEmpty @Size(max = 4) List<@Pattern(regexp = "ALERT_FIRING|ALERT_RESOLVED|DEPLOYMENT_HEALTHY|DEPLOYMENT_FAILED") String> eventTypes) {
+        @NotEmpty @Size(max = 7) List<@Pattern(regexp = "ALERT_FIRING|ALERT_RESOLVED|DEPLOYMENT_HEALTHY|DEPLOYMENT_FAILED|BUILD_FAILED|ROLLBACK_HEALTHY|ROLLBACK_FAILED") String> eventTypes) {
 }

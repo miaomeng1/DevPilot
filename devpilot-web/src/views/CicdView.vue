@@ -5,7 +5,17 @@ import { applicationApi, type Application } from '@/api/applications'
 import { cicdApi, type ApplicationEnvironment, type ApplicationEnvironmentVariable, type CicdActivity, type CicdConfiguration, type CicdConfigurationPayload, type CicdDeployment, type CicdPreview, type CicdPromotionTarget, type CicdReadiness, type PipelineRun } from '@/api/cicd'
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { safeHttpLink } from '@/utils/safeHttpLink'
+import { releaseGuidanceFor } from '@/utils/releaseGuidance'
+import { deploymentFailureFor } from '@/utils/deploymentFailure'
+import { imageDriftFor } from '@/utils/imageDrift'
+import { missingConfiguration } from '@/utils/missingConfiguration'
+import { latestRequest } from '@/utils/latestRequest'
+import { matchesPipelineFilter, type PipelineFilter } from '@/utils/pipelineFilter'
 import { generateWorkflow, type RuntimePreset } from '@/utils/workflowTemplates'
+import ManualReleaseApprovals from '@/components/ManualReleaseApprovals.vue'
+import GithubBuildCheck from '@/components/GithubBuildCheck.vue'
+import GithubObserverSettings from '@/components/GithubObserverSettings.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -19,8 +29,11 @@ const loading = ref(false)
 const saving = ref(false)
 const rollingBack = ref('')
 const errorMessage = ref('')
+const refreshFailed = ref(false)
+const loadedApplicationId = ref('')
 const successMessage = ref('')
 const revealedSecret = ref('')
+const revealedBuildSecret = ref('')
 const revealedPreviewSecret = ref('')
 const configurationExpanded = ref(false)
 const onboardingOpen = ref(false)
@@ -39,7 +52,7 @@ const promotionTarget = ref<CicdPromotionTarget | null>(null)
 const promoting = ref(false)
 const previews = ref<CicdPreview[]>([])
 const deletingPreview = ref<number | null>(null)
-const runFilter = ref('ALL')
+const runFilter = ref<PipelineFilter>('ALL')
 const runQuery = ref('')
 let pollTimer: number | undefined
 
@@ -87,22 +100,13 @@ const summary = computed(() => ({
 }))
 const latestRun = computed(() => runs.value[0] || null)
 const latestHealthyDeployment = computed(() => deployments.value.find((item) => item.status === 'HEALTHY') || null)
-const imageDrift = computed(() => {
-  const expected = latestHealthyDeployment.value?.imageUri || ''
-  const actual = selectedApp.value?.dockerImage || ''
-  if (!expected) return { state: 'unknown', label: '尚无健康基线', detail: '完成首次健康发布后开始检测' }
-  if (!actual) return { state: 'unknown', label: '等待运行清单', detail: 'Agent 尚未上报实际运行镜像' }
-  if (expected === actual) return { state: 'synced', label: '镜像一致 In sync', detail: actual }
-  return { state: 'drift', label: '检测到镜像漂移 Drift', detail: `期望 ${expected} · 实际 ${actual}` }
-})
+const evidenceClock = ref(Date.now())
+const imageDrift = computed(() => imageDriftFor(latestHealthyDeployment.value?.imageUri || '', selectedApp.value, evidenceClock.value))
 const filteredRuns = computed(() => {
   const needle = runQuery.value.trim().toLowerCase()
   return runs.value.filter((run) => {
     const matchesText = !needle || [run.externalRunId, run.commitSha, run.imageUri].some((value) => value?.toLowerCase().includes(needle))
-    const matchesStatus = runFilter.value === 'ALL'
-      || (runFilter.value === 'HEALTHY' && run.deployStatus === 'HEALTHY')
-      || (runFilter.value === 'FAILED' && ['FAILED', 'HEALTH_FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(run.deployStatus))
-      || (runFilter.value === 'ACTIVE' && ['RUNNING', 'QUEUED', 'TRIGGERING', 'TRIGGERED', 'VERIFYING'].includes(run.deployStatus))
+    const matchesStatus = matchesPipelineFilter(run, runFilter.value)
     return matchesText && matchesStatus
   })
 })
@@ -110,24 +114,15 @@ const activeDeployments = computed(() => activity.value.filter((item) => ['TRIGG
 const deliverySteps = computed(() => {
   const run = latestRun.value
   const successful = (value: string) => ['SUCCEEDED', 'PASSED', 'HEALTHY'].includes(value)
-  const failed = (value: string) => ['FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(value)
+  const failed = (value: string) => ['FAILED', 'BUILD_FAILED', 'CANCELLED', 'UNHEALTHY', 'HEALTH_FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(value)
   return [
     { label: '代码提交', detail: run ? run.commitSha.slice(0, 12) : '等待 Commit', state: run ? 'done' : 'idle' },
-    { label: '测试与扫描', detail: run ? `${statusLabel(run.testStatus)} · ${statusLabel(run.securityStatus)}` : 'Quality gates', state: run && successful(run.testStatus) && successful(run.securityStatus) ? 'done' : run && (failed(run.testStatus) || failed(run.securityStatus)) ? 'failed' : 'active' },
+    { label: '测试与扫描', detail: run?.observationStatus === 'STALE' ? '状态未知，等待核对 CI' : run ? `${statusLabel(run.testStatus)} · ${statusLabel(run.securityStatus)}` : 'Quality gates', state: run && successful(run.testStatus) && successful(run.securityStatus) ? 'done' : run && (failed(run.testStatus) || failed(run.securityStatus)) ? 'failed' : run && run.status === 'RUNNING' && run.observationStatus !== 'STALE' ? 'active' : 'idle' },
     { label: '不可变镜像', detail: run?.imageUri ? run.imageUri.split('/').pop() || run.imageUri : '等待 Image', state: run?.imageUri ? 'done' : run && failed(run.status) ? 'failed' : 'idle' },
     { label: '生产部署', detail: run ? statusLabel(run.deployStatus) : '等待 Deploy', state: run && run.deployStatus === 'HEALTHY' ? 'done' : run && failed(run.deployStatus) ? 'failed' : run && ['QUEUED', 'TRIGGERED', 'VERIFYING', 'TRIGGERING'].includes(run.deployStatus) ? 'active' : 'idle' },
   ]
 })
-const releaseGuidance = computed(() => {
-  if (!configuration.value) return '先完成仓库与部署平台配置，DevPilot 才能接收签名流水线回调。'
-  const run = latestRun.value
-  if (!run) return '配置已就绪。向受保护分支推送代码，开始第一条流水线。'
-  if (run.deployStatus === 'HEALTHY') return '最新版本已经通过部署后健康验证，可以安全提供服务。'
-  if (['FAILED', 'HEALTH_FAILED'].includes(run.deployStatus)) return '最新发布未通过。旧健康版本仍被保留，请查看错误或回滚记录。'
-  if (run.deployStatus === 'QUEUED') return '已有版本正在发布；当前版本已进入持久队列，前一个发布结束后会自动继续。'
-  if (['TRIGGERED', 'VERIFYING', 'TRIGGERING'].includes(run.deployStatus)) return '发布正在执行，DevPilot 会等待 Provider 完成并使用新的 Agent 探测结果验证。'
-  return '构建结果已收到；生产部署需要 CI 平台审批或手动运行 Production workflow。'
-})
+const releaseGuidance = computed(() => releaseGuidanceFor(!!configuration.value, latestRun.value, configuration.value?.repositoryProvider))
 const imageRepositoryError = computed(() => {
   const value = imageRepository.value.trim()
   if (!value) return '请填写镜像仓库 Image repository'
@@ -221,6 +216,9 @@ const statusLabels: Record<string, string> = {
   PROMOTION: '环境晋级 PROMOTION',
   PENDING: '等待中 PENDING',
   NOT_STARTED: '未开始 NOT STARTED',
+  BUILDING: '构建中 BUILDING',
+  BUILD_FAILED: '构建未通过',
+  AWAITING_APPROVAL: '构建通过 · 待人工发布',
   QUEUED: '排队中 QUEUED',
   SKIPPED: '已跳过 SKIPPED',
   DEPLOYING: '部署中 DEPLOYING',
@@ -344,33 +342,43 @@ async function initialize() {
     const [applicationList, recentActivity] = await Promise.all([applicationApi.list(), cicdApi.activity()])
     applications.value = applicationList
     activity.value = recentActivity
-    selectedId.value = applications.value[0]?.id || ''
+    const requested = router.currentRoute.value.query.application
+    selectedId.value = typeof requested === 'string' && applications.value.some(item => item.id === requested)
+      ? requested : applications.value[0]?.id || ''
     if (selectedId.value) await loadApplication()
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法加载 CI/CD 工作台 Workspace')
   } finally { loading.value = false }
 }
 
+const applicationReads = latestRequest()
 async function loadApplication(silent = false) {
   if (!selectedId.value) return
+  const applicationId = selectedId.value
+  const currentRequest = applicationReads.begin()
+  const isCurrent = () => currentRequest() && selectedId.value === applicationId
   if (!silent) loading.value = true
   errorMessage.value = ''
   // Keep a newly generated one-time secret visible while background polling
   // refreshes pipeline evidence. It is cleared only when the operator
   // explicitly switches/reloads the application.
-  if (!silent) revealedSecret.value = ''
+  if (!silent) { revealedSecret.value = ''; revealedBuildSecret.value = '' }
   if (!silent) revealedPreviewSecret.value = ''
   try {
-    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult, targetResults, previewResults] = await Promise.all([
-      cicdApi.configuration(selectedId.value).catch(() => null),
-      cicdApi.runs(selectedId.value),
-      cicdApi.deployments(selectedId.value),
-      applicationApi.get(selectedId.value),
-      cicdApi.environment(selectedId.value),
-      cicdApi.readiness(selectedId.value),
-      cicdApi.promotionTargets(selectedId.value),
-      cicdApi.previews(selectedId.value),
+    const [configurationResult, pipelineRuns, deploymentHistory, runtimeApplication, environmentResult, readinessResult, targetResults, previewResults, activityResult] = await Promise.all([
+      cicdApi.configuration(applicationId).catch(missingConfiguration),
+      cicdApi.runs(applicationId),
+      cicdApi.deployments(applicationId),
+      applicationApi.get(applicationId),
+      cicdApi.environment(applicationId),
+      cicdApi.readiness(applicationId),
+      cicdApi.promotionTargets(applicationId),
+      cicdApi.previews(applicationId),
+      cicdApi.activity(),
     ])
+    if (!isCurrent()) return
+    loadedApplicationId.value = applicationId
+    refreshFailed.value = false
     configuration.value = configurationResult
     if (!silent) {
       configurationExpanded.value = !configurationResult
@@ -386,10 +394,10 @@ async function loadApplication(silent = false) {
       resetEnvironmentDraft(environmentResult)
       environmentOpen.value = environmentResult.variables.length > 0
     }
-    activity.value = await cicdApi.activity()
+    activity.value = activityResult
     const applicationIndex = applications.value.findIndex((item) => item.id === runtimeApplication.id)
     if (applicationIndex >= 0) applications.value[applicationIndex] = runtimeApplication
-    Object.assign(form, configurationResult ? {
+    if (!silent) Object.assign(form, configurationResult ? {
       repositoryProvider: configurationResult.repositoryProvider,
       repositoryUrl: configurationResult.repositoryUrl,
       branchName: configurationResult.branchName,
@@ -414,8 +422,10 @@ async function loadApplication(silent = false) {
       rotatePreviewCallbackSecret: false, rotateCallbackSecret: false,
     })
   } catch (error) {
+    if (!isCurrent()) return
+    refreshFailed.value = true
     errorMessage.value = apiErrorMessage(error, '无法加载流水线历史 Pipeline history')
-  } finally { loading.value = false }
+  } finally { if (isCurrent()) loading.value = false }
 }
 
 async function save() {
@@ -430,6 +440,7 @@ async function save() {
     const saved = await cicdApi.saveConfiguration(selectedId.value, { ...form })
     configuration.value = saved
     revealedSecret.value = saved.oneTimeCallbackSecret || ''
+    revealedBuildSecret.value = saved.oneTimeBuildCallbackSecret || ''
     revealedPreviewSecret.value = saved.oneTimePreviewCallbackSecret || ''
     form.deploymentWebhookUrl = ''
     form.providerBaseUrl = ''
@@ -569,9 +580,12 @@ watch(selectedId, () => {
 })
 onMounted(() => {
   void initialize()
-  pollTimer = window.setInterval(() => void loadApplication(true), 15_000)
+  pollTimer = window.setInterval(() => {
+    evidenceClock.value = Date.now()
+    void loadApplication(true)
+  }, 15_000)
 })
-onBeforeUnmount(() => window.clearInterval(pollTimer))
+onBeforeUnmount(() => { applicationReads.invalidate(); window.clearInterval(pollTimer) })
 </script>
 
 <template>
@@ -582,12 +596,19 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
     </header>
 
     <p v-if="errorMessage" class="form-error"><span>!</span>{{ errorMessage }}</p>
+    <p v-if="refreshFailed" class="form-error" role="status">刷新失败，以下为上次成功读取的数据，不能据此确认当前运行或发布结果。请恢复连接后刷新。</p>
     <p v-if="successMessage" class="cicd-success">{{ successMessage }}</p>
     <RouterLink v-if="auth.hasAnyRole(['ADMIN'])" to="/cicd/onboarding" class="cicd-success">＋ 自动接入新项目 · 自动创建部署目标、Secrets 和流水线 PR/MR →</RouterLink>
     <div v-if="!applications.length && !loading" class="empty-panel"><strong>暂无应用 No applications</strong><p>使用自动接入向导，无需先运行业务容器。</p></div>
+    <div v-if="selectedId && loadedApplicationId !== selectedId" class="empty-panel" role="status">
+      <strong>{{ loading ? '正在读取所选应用…' : '尚未取得所选应用数据' }}</strong>
+      <p>确认加载完成后再操作，其他应用的配置不会显示在当前选择下。</p>
+      <button v-if="!loading" @click="loadApplication()">重试读取</button>
+    </div>
+    <template v-if="selectedId && loadedApplicationId === selectedId">
 
     <section v-if="activity.length" class="activity-panel">
-      <header><div><span>全局发布活动 · DEPLOYMENT ACTIVITY</span><strong>最近发布与回滚</strong><small>{{ activeDeployments ? `${activeDeployments} 个任务正在执行或验证` : '当前没有进行中的发布' }}</small></div><span class="activity-live"><i />LIVE</span></header>
+      <header><div><span>全局发布活动 · DEPLOYMENT ACTIVITY</span><strong>最近发布与回滚</strong><small>{{ refreshFailed ? '连接异常，请核对历史任务的当前状态' : activeDeployments ? `${activeDeployments} 个任务最近上报为执行或验证中` : '最近记录没有进行中的发布' }}</small></div><span class="activity-live"><i />{{ refreshFailed ? '历史记录' : '最近采样' }}</span></header>
       <div class="activity-list">
         <RouterLink v-for="item in activity.slice(0, 8)" :key="item.id" :to="{ path: '/cicd', query: { application: item.applicationId } }" @click="selectedId = item.applicationId">
           <span class="activity-kind" :class="item.deploymentKind.toLowerCase()">{{ item.deploymentKind === 'ROLLBACK' ? '回滚' : item.deploymentKind === 'PROMOTION' ? '晋级' : '发布' }}</span>
@@ -607,7 +628,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 
       <section class="delivery-overview">
         <header><div><span>当前发布 · CURRENT DELIVERY</span><strong>{{ latestRun ? statusLabel(latestRun.deployStatus) : '等待首次流水线' }}</strong><p>{{ releaseGuidance }}</p></div><div class="delivery-actions"><a v-if="configuration?.repositoryUrl" :href="configuration.repositoryUrl" target="_blank" rel="noreferrer">打开代码仓库 ↗</a><button type="button" @click="configurationExpanded = !configurationExpanded">{{ configurationExpanded ? '收起配置' : '配置与密钥' }}</button></div></header>
-        <ol class="delivery-flow"><li v-for="(step, index) in deliverySteps" :key="step.label" :class="step.state"><span>{{ index + 1 }}</span><div><strong>{{ step.label }}</strong><small>{{ step.detail }}</small></div></li></ol>
+        <ol class="delivery-flow"><li v-for="(step, index) in deliverySteps" :key="step.label" :class="step.state"><span>{{ index + 1 }}</span><div><strong>{{ step.label }}</strong><small :title="step.detail">{{ step.detail }}</small></div></li></ol>
       </section>
 
       <section v-if="readiness" class="readiness-panel" :class="{ ready: readiness.ready, blocked: !readiness.ready }">
@@ -808,6 +829,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             <label><span>回调地址 Callback path</span><code>{{ configuration.callbackUrl }}</code><button @click="copy(configuration.callbackUrl)">复制 Copy</button></label>
             <label v-if="configuration.previewEnabled"><span>Preview callback</span><code>{{ configuration.previewCallbackUrl }}</code><button @click="copy(configuration.previewCallbackUrl)">复制 Copy</button></label>
             <label v-if="revealedSecret" class="secret-reveal"><span>一次性回调密钥 One-time secret</span><code>{{ revealedSecret }}</code><button @click="copy(revealedSecret)">立即复制</button><small>此值不会再次显示，请存入受保护的 CI Secret。</small></label>
+            <label v-if="revealedBuildSecret" class="secret-reveal"><span>构建状态专用密钥（不能发布）</span><code>{{ revealedBuildSecret }}</code><button @click="copy(revealedBuildSecret)">复制状态密钥</button><small>存入 build-status-应用编码 环境的 DEVPILOT_BUILD_CALLBACK_SECRET；URL 为生产回调地址加 /builds。轮换生产密钥后，这项也必须更新。</small></label>
             <label v-if="revealedPreviewSecret" class="secret-reveal preview-secret"><span>一次性 Preview 密钥</span><code>{{ revealedPreviewSecret }}</code><button @click="copy(revealedPreviewSecret)">立即复制</button><small>权限仅限临时环境；不会再次显示。</small></label>
             <p>请求头 Header：<code>X-DevPilot-Signature: sha256=&lt;HMAC&gt;</code></p>
             <p>成功回调必须证明测试和安全门禁已通过，并使用 Digest 或 <code>sha-*</code> 镜像标签。</p>
@@ -816,10 +838,13 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         </aside>
       </div>
 
+      <ManualReleaseApprovals v-if="selectedId" :key="selectedId" :application-id="selectedId" :runs="runs" :repository-provider="configuration?.repositoryProvider" />
+      <GithubBuildCheck v-if="selectedId" :key="`github-check-${selectedId}`" :application-id="selectedId" :runs="runs" :repository-provider="configuration?.repositoryProvider" />
+      <GithubObserverSettings v-if="selectedId" :key="`github-observer-${selectedId}`" :application-id="selectedId" :repository-provider="configuration?.repositoryProvider" />
       <section class="pipeline-panel">
-        <header class="pipeline-heading"><div><strong>流水线凭证 Pipeline evidence</strong><small>提交、门禁、不可变镜像与部署请求</small></div><div class="pipeline-tools"><input v-model="runQuery" placeholder="搜索 Commit / Image" /><select v-model="runFilter"><option value="ALL">全部记录</option><option value="HEALTHY">健康发布</option><option value="FAILED">失败记录</option><option value="ACTIVE">进行中</option></select><button @click="loadApplication()">刷新</button></div></header>
+        <header class="pipeline-heading"><div><strong>流水线凭证 Pipeline evidence</strong><small>提交、门禁、不可变镜像与部署请求</small></div><div class="pipeline-tools"><input v-model="runQuery" placeholder="搜索 Commit / Image" /><select v-model="runFilter" aria-label="流水线状态筛选"><option value="ALL">全部记录</option><option value="HEALTHY">健康发布记录</option><option value="FAILED">失败 / 回滚记录</option><option value="CANCELLED">已取消 Cancelled</option><option value="ACTIVE">进行中（最近上报）</option><option value="APPROVAL">待发布确认</option><option value="UNKNOWN">状态未知 Stale</option></select><button @click="loadApplication()">刷新</button></div></header>
         <div class="table-scroll"><table class="console-table pipeline-table"><thead><tr><th>运行 / 提交</th><th>流水线 Pipeline</th><th>测试 Tests</th><th>安全 Security</th><th>镜像 Image</th><th>部署 Deployment</th><th>更新时间</th></tr></thead><tbody>
-          <tr v-for="run in filteredRuns" :key="run.id"><td><a v-if="run.runUrl" :href="run.runUrl" target="_blank" rel="noreferrer">{{ run.externalRunId }}</a><strong v-else>{{ run.externalRunId }}</strong><code>{{ run.commitSha.slice(0, 12) }}</code></td><td><span class="pipeline-state" :class="tone(run.status)">{{ statusLabel(run.status) }}</span></td><td><span class="pipeline-state" :class="tone(run.testStatus)">{{ statusLabel(run.testStatus) }}</span></td><td><span class="pipeline-state" :class="tone(run.securityStatus)">{{ statusLabel(run.securityStatus) }}</span></td><td><code class="image-uri">{{ run.imageUri || '尚未生成 Not produced' }}</code></td><td><span class="pipeline-state" :class="tone(run.deployStatus)">{{ statusLabel(run.deployStatus) }}</span><small v-if="run.deployError">{{ run.deployError }}</small></td><td>{{ formatTime(run.updatedAt) }}</td></tr>
+          <tr v-for="run in filteredRuns" :key="run.id"><td><a v-if="safeHttpLink(run.runUrl)" :href="safeHttpLink(run.runUrl) || undefined" target="_blank" rel="noreferrer">{{ run.externalRunId }}</a><strong v-else>{{ run.externalRunId }}</strong><code>{{ run.commitSha.slice(0, 12) }}</code><small v-if="run.buildExternalRunId">来源构建：{{ run.buildExternalRunId }}</small><small v-if="run.approvalActor">CI 上报发布发起人：{{ run.approvalActor }} · 任务开始：{{ formatTime(run.approvedAt) }}</small></td><td><span class="pipeline-state" :class="run.observationStatus === 'STALE' ? 'neutral' : tone(run.status)">{{ run.observationStatus === 'STALE' ? '状态未知 Stale' : statusLabel(run.status) }}</span><small v-if="run.observationMessage">{{ run.observationMessage }}</small></td><td><span class="pipeline-state" :class="tone(run.testStatus)">{{ statusLabel(run.testStatus) }}</span></td><td><span class="pipeline-state" :class="tone(run.securityStatus)">{{ statusLabel(run.securityStatus) }}</span></td><td><code class="image-uri">{{ run.imageUri || '尚未生成 Not produced' }}</code></td><td><span class="pipeline-state" :class="tone(run.deployStatus)">{{ run.observationStatus === 'STALE' && run.deployStatus === 'BUILDING' ? '等待核对 CI' : statusLabel(run.deployStatus) }}</span><small v-if="run.deployError">{{ run.deployError }}</small></td><td>{{ formatTime(run.updatedAt) }}</td></tr>
           <tr v-if="!filteredRuns.length"><td colspan="7" class="table-empty">没有符合筛选条件的流水线记录。</td></tr>
         </tbody></table></div>
       </section>
@@ -831,7 +856,13 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
             <td>{{ formatTime(deployment.startedAt) }}</td><td><span class="pipeline-state" :class="tone(deployment.deploymentKind)">{{ statusLabel(deployment.deploymentKind) }}</span></td><td><code class="image-uri">{{ deployment.imageUri }}</code></td>
             <td>{{ deployment.provider }}<small v-if="deployment.providerDeploymentId">{{ deployment.providerDeploymentId }}</small></td>
             <td><span class="pipeline-state" :class="tone(deployment.status)">{{ statusLabel(deployment.status) }}</span><small v-if="deployment.status === 'TRIGGERED'">截止 Deadline {{ formatTime(deployment.healthDeadlineAt) }}</small></td>
-            <td><details v-if="deployment.logs" class="deployment-log"><summary>查看采集日志 View logs</summary><pre>{{ deployment.logs }}</pre></details><span v-else>等待凭证 Awaiting evidence</span></td>
+            <td>
+              <div v-for="guide in [deploymentFailureFor(deployment)].filter(Boolean)" :key="deployment.id" class="failure-guide">
+                <strong>{{ guide!.stage }}</strong><p>{{ guide!.reason }}</p>
+                <p><b>下一步 Next：</b>{{ guide!.next }}</p><small>{{ guide!.recovery }}</small>
+              </div>
+              <details v-if="deployment.logs" class="deployment-log"><summary>查看采集日志 View logs</summary><pre>{{ deployment.logs }}</pre></details><span v-else>尚无采集日志 No logs collected</span>
+            </td>
             <td><button v-if="canPromote && deployment.status === 'HEALTHY'" class="rollback-action" :disabled="!!rollingBack" @click="rollback(deployment)">{{ rollingBack === deployment.id ? '回滚中…' : '回滚到此版本' }}</button><span v-else>—</span></td>
           </tr>
           <tr v-if="!deployments.length"><td colspan="7" class="table-empty">尚未触发部署 No deployments.</td></tr>
@@ -847,10 +878,16 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         <footer><button type="button" @click="promotionTarget = null">取消</button><button class="confirm-promotion" type="button" :disabled="promoting" @click="promote">{{ promoting ? '正在晋级…' : `晋级到 ${promotionTarget.environment}` }}</button></footer>
       </section>
     </div>
+    </template>
   </section>
 </template>
 
 <style scoped>
+.delivery-flow li > div { min-width: 0; }
+.deployment-table .failure-guide { box-sizing: border-box; width: 360px; max-width: calc(100vw - 76px); margin-bottom: 12px; padding: 12px; border: 1px solid rgba(180, 120, 40, .35); border-radius: 8px; background: rgba(180, 120, 40, .07); white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
+.deployment-table .failure-guide strong { color: var(--text); }
+.deployment-table .failure-guide p { margin: 8px 0; color: var(--text); line-height: 1.6; }
+.deployment-table .failure-guide small { display: block; max-width: none; overflow: visible; text-overflow: clip; white-space: normal; color: var(--muted); line-height: 1.6; font-size: 12px; }
 .cicd-view{max-width:1480px;margin:0 auto}.cicd-heading{align-items:center}.app-selector{display:grid;gap:6px;color:#718096;font-size:8px;font-weight:700}.app-selector select,.cicd-form input,.cicd-form select{height:38px;border:1px solid var(--line);border-radius:8px;padding:0 10px;color:var(--text);background:var(--panel);font-size:8px}.app-selector select{min-width:240px}.cicd-success{margin:0 0 12px;border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px;color:#4ade80;background:rgba(34,197,94,.05);font-size:8px}.cicd-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;overflow:hidden;border:1px solid var(--line);border-radius:11px;background:var(--line)}.cicd-summary article{padding:16px;background:var(--panel)}.cicd-summary span,.cicd-summary small{display:block;color:#64748b;font-size:8px}.cicd-summary strong{display:block;margin:8px 0 5px;font-size:21px}.cicd-layout{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:14px;margin-top:14px}.cicd-panel,.callback-panel,.pipeline-panel{overflow:hidden;border:1px solid var(--line);border-radius:11px;background:var(--panel)}.cicd-panel>header,.callback-panel>header,.pipeline-panel>header{display:flex;min-height:58px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:0 15px}.cicd-panel header strong,.cicd-panel header small,.callback-panel header strong,.callback-panel header small,.pipeline-panel header strong,.pipeline-panel header small{display:block}.cicd-panel header strong,.callback-panel header strong,.pipeline-panel header strong{font-size:10px}.cicd-panel header small,.callback-panel header small,.pipeline-panel header small{margin-top:4px;color:#617087;font-size:8px}.cicd-panel>header>span{display:flex;align-items:center;gap:5px;color:#64748b;font-size:7px}.cicd-panel>header>span i{width:5px;height:5px;border-radius:50%;background:currentColor}.cicd-panel>header>span.live{color:#4ade80}.cicd-form{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:15px}.cicd-form label:not(.check){display:grid;gap:6px;color:#7d8ba0;font-size:8px;font-weight:700}.cicd-form label small{color:#5f6d81;font-weight:400}.cicd-form .wide{grid-column:1/-1}.check{display:flex;grid-column:1/-1;align-items:center;gap:8px;color:#8795a9;font-size:8px}.check input{accent-color:#2563eb}.danger-check{color:#f59e0b}.cicd-form footer{display:flex;align-items:center;justify-content:flex-end}.primary-action,.pipeline-panel>header>button,.callback-body button{height:31px;border:0;border-radius:7px;padding:0 12px;color:#fff;background:#2563eb;font-size:8px;font-weight:750}.callback-body{display:grid;gap:13px;padding:15px}.callback-body label{display:grid;grid-template-columns:1fr auto;gap:6px}.callback-body label>span,.callback-body label>small{grid-column:1/-1;color:#68778c;font-size:8px}.callback-body code{overflow:hidden;border:1px solid var(--line);border-radius:6px;padding:9px;color:#93c5fd;background:#080d18;font:8px ui-monospace,monospace;text-overflow:ellipsis}.callback-body button{height:auto}.callback-body p,.callback-empty{margin:0;color:#64748b;font-size:8px;line-height:1.6}.secret-reveal{border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;background:rgba(245,158,11,.04)}.callback-empty{padding:18px}.pipeline-panel{margin-top:14px}.pipeline-panel>header>button{border:1px solid var(--line);color:#8ba9d7;background:transparent}.pipeline-table{min-width:1120px}.pipeline-table td:first-child strong,.pipeline-table td:first-child a,.pipeline-table td:first-child code{display:block}.pipeline-table td:first-child a{color:#82adf5;text-decoration:none;font-weight:750}.pipeline-table td:first-child code{margin-top:5px;color:#69788d}.pipeline-state{display:inline-flex;border-radius:4px;padding:4px 6px;color:#94a3b8;background:rgba(100,116,139,.08);font-size:6px;font-weight:850}.pipeline-state.success{color:#4ade80;background:rgba(34,197,94,.08)}.pipeline-state.danger{color:#f87171;background:rgba(239,68,68,.08)}.pipeline-state.running{color:#60a5fa;background:rgba(59,130,246,.08)}.image-uri{display:block;max-width:260px;overflow:hidden;color:#a78bfa;text-overflow:ellipsis;white-space:nowrap}.pipeline-table td small{display:block;max-width:180px;overflow:hidden;margin-top:4px;color:#f87171;text-overflow:ellipsis;white-space:nowrap}.empty-panel{border:1px solid var(--line);border-radius:11px;padding:30px;text-align:center;background:var(--panel)}.empty-panel p{color:#64748b;font-size:8px}.table-empty{text-align:center;color:#64748b!important}@media(max-width:1050px){.cicd-layout{grid-template-columns:1fr}.cicd-summary{grid-template-columns:1fr 1fr}}@media(max-width:700px){.cicd-heading{align-items:stretch;flex-direction:column}.app-selector select{width:100%}.cicd-form{grid-template-columns:1fr}.cicd-form .wide{grid-column:1}.cicd-summary{gap:8px;border:0;background:transparent}.cicd-summary article{border:1px solid var(--line);border-radius:9px}}
 .deployment-table{min-width:1180px}.deployment-log{max-width:480px;color:#7e8ca1}.deployment-log summary{cursor:pointer;color:#82adf5;font-size:7px;font-weight:750}.deployment-log pre{max-height:360px;overflow:auto;margin:8px 0 0;border:1px solid var(--line);border-radius:6px;padding:10px;color:#b8c4d6;background:#080d18;font:7px/1.55 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}.rollback-action{height:28px;border:1px solid rgba(245,158,11,.25);border-radius:6px;padding:0 9px;color:#fbbf24;background:rgba(245,158,11,.05);font-size:7px;font-weight:750}.rollback-action:disabled{opacity:.5}.deployment-table td small{display:block;max-width:190px;overflow:hidden;margin-top:4px;color:#f59e0b;text-overflow:ellipsis;white-space:nowrap}
 

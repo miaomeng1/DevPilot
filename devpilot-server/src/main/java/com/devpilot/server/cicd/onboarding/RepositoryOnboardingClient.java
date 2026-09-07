@@ -104,6 +104,15 @@ public class RepositoryOnboardingClient {
         String environment = "production-" + applicationCode;
         String callback = request.publicBaseUrl().replaceAll("/+$", "") + "/api/cicd/webhooks/" + applicationCode;
         if (provider.equals("GITHUB")) {
+            String buildRoot = repo.api() + "/environments/" + encode("build-status-" + applicationCode);
+            if (http.optional(provider, token, buildRoot) == null) http.call(provider, token, "PUT", buildRoot, Map.of());
+            JsonNode buildKey = http.call(provider, token, "GET", buildRoot + "/secrets/public-key", null);
+            for (var secret : Map.of("DEVPILOT_BUILD_CALLBACK_URL", callback + "/builds", "DEVPILOT_BUILD_CALLBACK_SECRET",
+                    com.devpilot.server.cicd.service.BuildStatusKey.derive(callbackSecret)).entrySet()) {
+                http.call(provider, token, "PUT", buildRoot + "/secrets/" + secret.getKey(),
+                        Map.of("key_id", buildKey.path("key_id").asText(), "encrypted_value", GithubSecretBox.seal(buildKey.path("key").asText(), secret.getValue())));
+                http.call(provider, token, "GET", buildRoot + "/secrets/" + secret.getKey(), null);
+            }
             // Per-application environment avoids overwriting secrets of another project in a monorepo.
             String root = repo.api() + "/environments/" + encode(environment);
             if (http.optional(provider, token, root) == null) {
@@ -123,12 +132,15 @@ public class RepositoryOnboardingClient {
                 throw new IllegalArgumentException("GitLab 发布分支尚未受保护；请先保护该分支，避免自动接入改变已有协作权限");
             }
             for (var secret : Map.of("DEVPILOT_CICD_CALLBACK_URL", callback,
-                    "DEVPILOT_CICD_CALLBACK_SECRET", callbackSecret).entrySet()) {
-                String endpoint = repo.api() + "/variables/" + secret.getKey() + "?filter[environment_scope]=" + encode(environment);
+                    "DEVPILOT_CICD_CALLBACK_SECRET", callbackSecret,
+                    "DEVPILOT_BUILD_CALLBACK_URL", callback + "/builds",
+                    "DEVPILOT_BUILD_CALLBACK_SECRET", com.devpilot.server.cicd.service.BuildStatusKey.derive(callbackSecret)).entrySet()) {
+                String scope = secret.getKey().startsWith("DEVPILOT_BUILD_") ? "build-status-" + applicationCode : environment;
+                String endpoint = repo.api() + "/variables/" + secret.getKey() + "?filter[environment_scope]=" + encode(scope);
                 // Encode brackets for java.net.URI while preserving GitLab's filter name.
                 endpoint = endpoint.replace("[", "%5B").replace("]", "%5D");
                 boolean exists = http.optional(provider, token, endpoint) != null;
-                var body = Map.of("key", secret.getKey(), "value", secret.getValue(), "environment_scope", environment,
+                var body = Map.of("key", secret.getKey(), "value", secret.getValue(), "environment_scope", scope,
                         "protected", true, "masked", true, "raw", true);
                 http.call(provider, token, exists ? "PUT" : "POST", exists ? endpoint : repo.api() + "/variables", body);
             }

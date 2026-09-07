@@ -4,6 +4,9 @@ import { serverApi, type CreateServerResult, type ServerNode } from '@/api/serve
 import { apiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useServerStore } from '@/stores/servers'
+import { beginServerCreation, completeServerCreation, readServerCreation, type PendingServerCreation } from '@/utils/serverCreationRequest'
+import AgentTokenRenewal from '@/components/AgentTokenRenewal.vue'
+import ServerCreationRecovery from '@/components/ServerCreationRecovery.vue'
 
 const auth = useAuthStore()
 const store = useServerStore()
@@ -14,6 +17,8 @@ const creating = ref(false)
 const created = ref<CreateServerResult | null>(null)
 const errorMessage = ref('')
 const copied = ref<'token' | 'command' | null>(null)
+const pending = ref<PendingServerCreation | null>(null)
+const renewalServer = ref<ServerNode | null>(null)
 let pollTimer: number | undefined
 
 const canCreate = computed(() => auth.hasAnyRole(['ADMIN']))
@@ -37,19 +42,29 @@ function openDialog() {
   errorMessage.value = ''
   copied.value = null
   dialogOpen.value = true
+  try {
+    pending.value = readServerCreation(auth.user?.id)
+    if (pending.value) serverName.value = pending.value.name
+  } catch { errorMessage.value = '无法恢复创建请求，请先核对已有服务器。' }
 }
 
 function closeDialog() {
+  if (creating.value) return
+  if (created.value && pending.value) {
+    completeServerCreation(auth.user?.id, pending.value.requestId)
+    pending.value = null
+  }
   dialogOpen.value = false
   if (created.value) void store.load(true)
 }
 
 async function createServer() {
-  if (serverName.value.trim().length < 2) return
+  if (creating.value || serverName.value.trim().length < 2) return
   creating.value = true
   errorMessage.value = ''
   try {
-    created.value = await serverApi.create(serverName.value.trim())
+    pending.value = beginServerCreation(auth.user?.id, serverName.value)
+    created.value = await serverApi.create(pending.value.name, pending.value.requestId)
     store.prepend(created.value.server)
   } catch (error) {
     errorMessage.value = apiErrorMessage(error, '无法创建服务器')
@@ -135,7 +150,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
               <td><span class="status-badge" :class="server.status.toLowerCase()"><i />{{ server.status }}</span></td>
               <td><strong class="cell-primary">{{ server.os || 'Not reported' }}</strong><small class="cell-secondary">{{ server.architecture || '—' }} · {{ server.kernel || 'kernel pending' }}</small></td>
               <td><strong class="cell-primary">{{ server.cpuCores ? `${server.cpuCores} cores` : '—' }}</strong><small class="cell-secondary">{{ bytes(server.memoryTotal) }} RAM</small></td>
-              <td><strong class="cell-primary mono">{{ server.agentVersion || 'Awaiting' }}</strong><small class="cell-secondary">DevPilot Agent</small></td>
+              <td><strong class="cell-primary mono">{{ server.agentVersion || 'Awaiting' }}</strong><small class="cell-secondary">DevPilot Agent</small><button v-if="canCreate" type="button" @click="renewalServer = server">重新签发 Token</button></td>
               <td><strong class="cell-primary">{{ relativeTime(server.lastHeartbeat) }}</strong><small class="cell-secondary">{{ server.registeredAt ? 'Registered' : 'Never connected' }}</small></td>
             </tr>
           </tbody>
@@ -143,6 +158,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       </div>
     </article>
 
+    <AgentTokenRenewal v-if="renewalServer" :server="renewalServer" @close="renewalServer = null; store.load(true)" />
     <div v-if="dialogOpen" class="modal-backdrop" @click.self="closeDialog">
       <section class="server-dialog" role="dialog" aria-modal="true" aria-labelledby="server-dialog-title">
         <header><div><span>{{ created ? 'AGENT CREDENTIAL · READY' : 'CONNECT INFRASTRUCTURE · 01' }}</span><h2 id="server-dialog-title">{{ created ? 'Install DevPilot Agent' : 'Add a server' }}</h2></div><button type="button" aria-label="Close" @click="closeDialog">×</button></header>
@@ -150,7 +166,9 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         <template v-if="!created">
           <div class="dialog-body">
             <p>Create a server placeholder, then run the generated install command on the target Linux host.</p>
-            <label><span>Server name</span><input v-model.trim="serverName" maxlength="100" placeholder="prod-server-01" autofocus @keyup.enter="createServer" /><small>Use a name that describes environment or workload.</small></label>
+            <label><span>Server name</span><input v-model.trim="serverName" :readonly="!!pending" maxlength="100" placeholder="prod-server-01" autofocus @keyup.enter="createServer" /><small>Use a name that describes environment or workload.</small></label>
+            <p v-if="pending">正在恢复之前的创建请求，重试不会新增另一台服务器。</p>
+            <ServerCreationRecovery v-if="pending" :key="pending.requestId" :pending="pending" :disabled="creating" @finished="pending = null; serverName = ''; errorMessage = ''" />
             <p v-if="errorMessage" class="form-error"><span>!</span>{{ errorMessage }}</p>
           </div>
           <footer><button type="button" @click="closeDialog">Cancel</button><button class="dialog-primary" type="button" :disabled="creating || serverName.length < 2" @click="createServer">{{ creating ? 'Generating…' : 'Generate Agent token' }} <b>→</b></button></footer>
@@ -158,7 +176,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
 
         <template v-else>
           <div class="dialog-body credential-body">
-            <div class="credential-warning"><span>!</span><div><strong>Copy this credential now</strong><small>The raw Agent token is shown once and stored only as a SHA-256 hash.</small></div></div>
+            <div class="credential-warning"><span>!</span><div><strong>请妥善保存安装凭据</strong><small>Agent 认证保存 SHA-256 摘要；为恢复丢失响应，创建结果另加密暂存 24 小时。关闭此窗口会结束本次创建重试，请先复制命令。</small></div></div>
             <label><span>Agent token</span><div class="copy-field"><code>{{ created.agentToken }}</code><button type="button" @click="copy('token', created.agentToken)">{{ copied === 'token' ? 'Copied' : 'Copy' }}</button></div></label>
             <label><span>Install command</span><div class="copy-field command"><code>{{ created.installCommand }}</code><button type="button" @click="copy('command', created.installCommand)">{{ copied === 'command' ? 'Copied' : 'Copy' }}</button></div></label>
             <ol class="install-steps"><li><b>1</b><span>SSH into <strong>{{ created.server.name }}</strong></span></li><li><b>2</b><span>Run the command above as root</span></li><li><b>3</b><span>The node turns ONLINE after registration</span></li></ol>

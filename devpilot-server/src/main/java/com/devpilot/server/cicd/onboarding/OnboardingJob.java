@@ -10,6 +10,7 @@ public class OnboardingJob {
     @TableId(type = IdType.INPUT) private String id;
     private Long applicationId;
     private String requestCipher;
+    private LocalDateTime credentialsUpdatedAt;
     private Integer stage;
     private String status;
     private String resourceId;

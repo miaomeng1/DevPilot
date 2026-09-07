@@ -11,9 +11,14 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AgentTokenRenewal: typeof import('./components/AgentTokenRenewal.vue')['default']
     BaseChart: typeof import('./components/BaseChart.vue')['default']
     ContainerLogsPanel: typeof import('./components/ContainerLogsPanel.vue')['default']
+    GithubBuildCheck: typeof import('./components/GithubBuildCheck.vue')['default']
+    GithubObserverSettings: typeof import('./components/GithubObserverSettings.vue')['default']
+    ManualReleaseApprovals: typeof import('./components/ManualReleaseApprovals.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    ServerCreationRecovery: typeof import('./components/ServerCreationRecovery.vue')['default']
   }
 }

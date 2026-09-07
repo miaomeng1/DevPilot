@@ -25,6 +25,7 @@ public class CicdConfigurationEntity {
     private String providerVerificationError;
     private String callbackSecretCipher;
     private LocalDateTime callbackVerifiedAt;
+    private LocalDateTime buildCallbackVerifiedAt;
     private Integer autoDeploy;
     private Integer productionApproval;
     private Integer autoRollback;

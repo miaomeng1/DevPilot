@@ -39,6 +39,7 @@ const navigation = computed(() => [
   { label: '告警 Alerts', code: 'AL', to: '/alerts' },
   { label: '维护 Maintenance', code: 'MT', to: '/maintenance', adminOnly: true },
   { label: '审计 Audit', code: 'AU', to: '/audit', adminOnly: true },
+  { label: '初始化 Setup', code: 'IN', to: '/setup', adminOnly: true },
   { label: '设置 Settings', code: 'ST', to: '/settings', adminOnly: true },
 ].filter((item) => !item.adminOnly || auth.hasAnyRole(['ADMIN'])))
 

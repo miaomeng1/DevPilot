@@ -1,0 +1,57 @@
+// Browser component acceptance with mock HTTP only; never sends credentials externally.
+const fs = require('node:fs')
+const path = require('node:path')
+const assert = require('node:assert/strict')
+const root = path.resolve(__dirname, '../devpilot-web')
+const { parse, compileScript } = require(require.resolve('@vue/compiler-sfc', { paths: [root] }))
+const esbuild = require(require.resolve('esbuild', { paths: [root] }))
+const { chromium } = require(process.env.DEVPILOT_PLAYWRIGHT_MODULE || '/Users/miaomeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')
+;(async () => {
+  const source = fs.readFileSync(path.join(root, 'src/components/GithubBuildCheck.vue'), 'utf8')
+  const descriptor = parse(source).descriptor
+  const script = compileScript(descriptor, { id: 'check-test', inlineTemplate: true }).content
+  const bundle = await esbuild.build({ stdin: { contents: script.replace('export default', 'const Component =') + `
+    import {createApp} from 'vue'; createApp(Component,{applicationId:'1',repositoryProvider:'GITHUB',runs:[{id:'42',externalRunId:'build:github-42-1',commitSha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}]}).mount('#app');`,
+    resolveDir: root, loader: 'ts' }, bundle: true, write: false, format: 'iife', plugins: [{ name: 'mock-api', setup(build) {
+      build.onResolve({ filter: /^@\// }, args => ({ path: args.path, namespace: 'mock' }))
+      build.onLoad({ filter: /.*/, namespace: 'mock' }, args => ({ contents: args.path.includes('stores/auth')
+        ? `export function useAuthStore(){return {user:{id:'1'},hasAnyRole:()=>true}}`
+        : `export const apiClient={post:(url,body,config)=>{window.calls.push({url,body});return new Promise(resolve=>{window.deliver=()=>resolve({data:{data:{buildId:'42',state:'SUCCESS_AWAITING_BUILD_EVIDENCE',message:'仍需构建证据',checkedAt:'2026-09-06T00:00:00Z',retryAfterSeconds:0}}})})}}` }))
+    }}] })
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<div id="app"></div>' }))
+    await page.goto('http://127.0.0.1:19998/')
+    await page.evaluate(() => { window.calls = [] })
+    await page.addScriptTag({ content: bundle.outputFiles[0].text })
+    await page.getByRole('button', { name: '核对 GitHub 构建 · Read-only check' }).click()
+    await page.getByLabel('构建记录').selectOption('42')
+    const input = page.getByLabel('GitHub Token（本仓库 Actions: read）')
+    await input.fill('fixture_token_only')
+    await page.getByRole('button', { name: '只读核对 Check', exact: true }).click()
+    assert.equal(await input.inputValue(), '')
+    assert.equal(await page.getByRole('button', { name: '正在核对…' }).isDisabled(), true)
+    assert.equal(await page.evaluate(() => window.calls.length), 1)
+    assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0)
+    await page.getByRole('button', { name: '收起核对' }).click()
+    await page.evaluate(() => window.deliver())
+    await page.getByRole('button', { name: '核对 GitHub 构建 · Read-only check' }).click()
+    assert.equal(await input.inputValue(), '')
+    assert.equal(await page.getByRole('status').count(), 0)
+    await input.fill('fixture_token_only')
+    await page.getByRole('button', { name: '只读核对 Check', exact: true }).click()
+    await page.evaluate(() => window.deliver())
+    await page.getByRole('status').waitFor()
+    assert.match(await page.getByRole('status').innerText(), /仍需构建证据/)
+    await page.getByText('回调丢失时如何恢复 · Recover build', { exact: true }).click()
+    const guidance = await page.getByRole('status').innerText()
+    assert.match(guidance, /operation=recover_build，build_run_id 填 42/)
+    assert.match(guidance, /当前记录为 attempt 1/)
+    assert.match(guidance, /本面板不会执行恢复/)
+    assert.match(guidance, /人工确认，再选择 operation=release/)
+    assert.equal(await page.evaluate(() => window.calls.length), 2)
+    assert.equal(await page.getByRole('button', { name: '发布', exact: true }).count(), 0)
+    console.log('PASS: actual Vue component clears credential, prevents duplicate request, ignores closed-panel response, renders evidence-only result; no external HTTP')
+  } finally { await browser.close() }
+})().catch(error => { console.error(error); process.exitCode = 1 })

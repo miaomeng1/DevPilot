@@ -45,6 +45,9 @@ OTEL_METRIC_EXPORT_INTERVAL=60s
 - `devpilot_servers_managed`、`devpilot_servers_online`
 - `devpilot_containers_discovered`、`devpilot_containers_running`
 - `devpilot_applications_managed`、`devpilot_applications_healthy`
+- `devpilot_applications_unhealthy`、`devpilot_applications_unknown`
+
+应用分类使用与 Dashboard 相同的观测口径，不再用总数减异常数推导健康数。Agent 必须在线、容器清单在最近 60 秒内且时间不异常超前；否则归为 unknown。新鲜清单中的停止/异常容器归为 unhealthy。配置了应用健康 URL 时，还需最近 60 秒的探测结果；没有应用健康 URL 时，只将 Docker 明确报告 healthy 的容器归为 healthy，单纯 running 不足以证明健康。未知表示证据不足，不应配置成“应用必然宕机”的告警。指标是最近一次成功采样，应结合 `devpilot_metrics_snapshot_success` 检查采样是否正常。
 - `devpilot_alerts_active`、`devpilot_alerts_critical`
 - `devpilot_metrics_snapshot_success`
 

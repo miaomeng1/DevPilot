@@ -1,7 +1,7 @@
 package docker
 
 import (
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
 	"testing"
 )
 
@@ -12,7 +12,7 @@ func TestSwarmPublishedPortsMatchServiceNotImage(t *testing.T) {
 	}
 	service := swarm.Service{}
 	service.Spec.Name = "demo"
-	service.Endpoint.Ports = []swarm.PortConfig{{PublishedPort: 18088, TargetPort: 8080, Protocol: swarm.PortConfigProtocolTCP, PublishMode: swarm.PortConfigPublishModeIngress}}
+	service.Endpoint.Ports = []swarm.PortConfig{{PublishedPort: 18088, TargetPort: 8080, Protocol: "tcp", PublishMode: swarm.PortConfigPublishModeIngress}}
 	appendSwarmPorts(containers, []swarm.Service{service})
 	if len(containers[0].Ports) != 2 || containers[0].Ports[1] != "Swarm ingress :18088→8080/tcp" {
 		t.Fatalf("missing published port: %#v", containers[0].Ports)

@@ -54,15 +54,16 @@ public class CicdReadinessService {
         checks.add(configurationCheck(configuration));
         checks.add(providerCheck(configuration));
         checks.add(callbackCheck(configuration));
+        checks.add(buildCallbackCheck(configuration));
         checks.add(automationCheck(configuration));
 
         ServerNodeEntity server = serverMapper.selectActiveById(application.getServerId());
-        checks.add(serverCheck(server));
-        checks.add(healthCheck(application, timestamp));
+        checks.add(serverCheck(server, timestamp));
+        checks.add(healthCheck(application, server, timestamp));
         checks.add(capacityCheck(application, timestamp));
         checks.add(environmentCheck(applicationId, configuration));
         checks.add(concurrencyCheck(applicationId));
-        checks.add(runtimeCheck(application));
+        checks.add(runtimeCheck(application, server, timestamp));
         checks.add(artifactCheck(applicationId));
 
         int blockers = (int) checks.stream().filter(check -> "BLOCK".equals(check.status())).count();
@@ -129,11 +130,23 @@ public class CicdReadinessService {
 
     private CicdReadinessCheckResponse callbackCheck(CicdConfigurationEntity configuration) {
         boolean ready = configuration != null && configuration.getCallbackSecretCipher() != null;
-        if (!ready) return check("CALLBACK", "BLOCK", "签名回调", "缺少 CI 回调密钥。", "CONFIGURE_CICD");
+        if (!ready) return check("CALLBACK", "BLOCK", "发布签名回调", "缺少 CI 回调密钥。", "CONFIGURE_CICD");
         if (configuration.getCallbackVerifiedAt() == null) {
-            return check("CALLBACK", "WARN", "签名回调", "密钥已保存，但尚未收到 CI 的有效签名回调；外网连通性尚未证实。", "VIEW_PIPELINES");
+            return check("CALLBACK", "WARN", "发布签名回调", "密钥已保存，但尚无当前密钥的有效发布回调证据；构建回调不能证明发布回调可达。首次发布仍需人工确认，不要为消除此提示跳过审批。", "VIEW_PIPELINES");
         }
-        return check("CALLBACK", "PASS", "签名回调", "已收到并验证 CI 回调；历史证据不保证当前网络持续可用。", null);
+        return check("CALLBACK", "PASS", "发布签名回调", "已验证发布回调（UTC " + configuration.getCallbackVerifiedAt()
+                + "）；仅证明签名请求曾送达，不证明部署成功或当前网络持续可用。", null);
+    }
+
+    private static CicdReadinessCheckResponse buildCallbackCheck(CicdConfigurationEntity configuration) {
+        if (configuration == null || configuration.getCallbackSecretCipher() == null) {
+            return check("BUILD_CALLBACK", "WARN", "构建签名回调", "等待配置独立的构建回调凭据。", "CONFIGURE_CICD");
+        }
+        if (configuration.getBuildCallbackVerifiedAt() == null) {
+            return check("BUILD_CALLBACK", "WARN", "构建签名回调", "尚无当前密钥的有效构建回调证据；历史构建记录或 GitHub 状态查询不等于签名回调已送达。", "VIEW_PIPELINES");
+        }
+        return check("BUILD_CALLBACK", "PASS", "构建签名回调", "已验证构建回调（UTC " + configuration.getBuildCallbackVerifiedAt()
+                + "）；不代表构建成功、发布回调已验证或当前网络持续可用。", null);
     }
 
     private static CicdReadinessCheckResponse automationCheck(CicdConfigurationEntity configuration) {
@@ -148,21 +161,33 @@ public class CicdReadinessService {
         return check("AUTOMATION", "PASS", "自动部署", "生产审批与门禁通过后进入受控发布。", null);
     }
 
-    private static CicdReadinessCheckResponse serverCheck(ServerNodeEntity server) {
+    private static boolean freshAgent(ServerNodeEntity server, LocalDateTime timestamp) {
+        return server != null && "ONLINE".equals(server.getAgentStatus()) && server.getLastHeartbeat() != null
+                && !server.getLastHeartbeat().isBefore(timestamp.minusMinutes(2))
+                && !server.getLastHeartbeat().isAfter(timestamp.plusSeconds(30));
+    }
+
+    private static CicdReadinessCheckResponse serverCheck(ServerNodeEntity server, LocalDateTime timestamp) {
         if (server == null) return check("AGENT", "BLOCK", "目标服务器", "关联服务器不存在。", "CONFIGURE_APPLICATION");
+        if ("ONLINE".equals(server.getAgentStatus()) && !freshAgent(server, timestamp)) {
+            return check("AGENT", "WARN", "Agent 连接", "在线标记缺少近期有效心跳，当前连接未确认；请检查采集时间和时钟。", "OPEN_SERVER");
+        }
         return "ONLINE".equals(server.getAgentStatus())
                 ? check("AGENT", "PASS", "Agent 连接", server.getName() + " 在线，可执行健康探测。", null)
                 : check("AGENT", "BLOCK", "Agent 连接",
                 server.getName() + " 当前为 " + server.getAgentStatus() + "。", "OPEN_SERVER");
     }
 
-    private static CicdReadinessCheckResponse healthCheck(ApplicationEntity application, LocalDateTime timestamp) {
+    private static CicdReadinessCheckResponse healthCheck(ApplicationEntity application, ServerNodeEntity server, LocalDateTime timestamp) {
         if (application.getHealthCheckUrl() == null || application.getHealthCheckUrl().isBlank()) {
             return check("HEALTH", "BLOCK", "健康验证", "未配置 HTTP(S) 健康检查地址，无法确认新版本。",
                     "CONFIGURE_APPLICATION");
         }
         if (application.getHealthCheckedAt() == null) {
             return check("HEALTH", "WARN", "健康验证", "地址已配置，仍在等待 Agent 首次探测。", "OPEN_SERVER");
+        }
+        if (!freshAgent(server, timestamp) || application.getHealthCheckedAt().isAfter(timestamp.plusSeconds(30))) {
+            return check("HEALTH", "WARN", "健康验证", "Agent 连接或探测时间无有效近期证据；当前健康未知，不能把历史健康当作本次验证通过。", "OPEN_SERVER");
         }
         if (application.getHealthCheckedAt().isBefore(timestamp.minusMinutes(2))) {
             return check("HEALTH", "WARN", "健康验证", "最近探测已超过 2 分钟，请检查 Agent。", "OPEN_SERVER");
@@ -228,12 +253,17 @@ public class CicdReadinessService {
         return check("CONCURRENCY", "PASS", "发布并发", "当前没有执行中或排队中的版本。", null);
     }
 
-    private CicdReadinessCheckResponse runtimeCheck(ApplicationEntity application) {
+    private CicdReadinessCheckResponse runtimeCheck(ApplicationEntity application, ServerNodeEntity server, LocalDateTime timestamp) {
         DockerContainerSnapshotEntity container = application.getContainerSnapshotId() == null ? null
                 : containerMapper.selectById(application.getContainerSnapshotId());
         if (container == null || !Integer.valueOf(1).equals(container.getActive())) {
             return check("RUNTIME", "WARN", "当前容器", "关联容器不在最新清单中；部署仍可修复运行状态。",
                     "CONFIGURE_APPLICATION");
+        }
+        if (!freshAgent(server, timestamp) || container.getLastSeenAt() == null
+                || container.getLastSeenAt().isBefore(timestamp.minusMinutes(2))
+                || container.getLastSeenAt().isAfter(timestamp.plusSeconds(30))) {
+            return check("RUNTIME", "WARN", "当前容器", "容器清单缺少近期有效采集或 Agent 心跳，当前运行状态未知；历史 running 不代表仍在运行。", "OPEN_SERVER");
         }
         if (!"running".equalsIgnoreCase(container.getState())) {
             return check("RUNTIME", "WARN", "当前容器", container.getName() + " 当前为 " + container.getState() + "。",

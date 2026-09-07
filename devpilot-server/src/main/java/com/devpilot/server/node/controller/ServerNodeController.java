@@ -54,4 +54,28 @@ public class ServerNodeController {
         serverNodeService.delete(id);
         return ApiResponse.success(null);
     }
+
+    @GetMapping("/{id}/registration")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<ServerNodeService.RegistrationState>> registration(@PathVariable Long id) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .body(ApiResponse.success(serverNodeService.registration(id)));
+    }
+
+    @GetMapping("/creation-requests/{requestId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<ServerNodeService.CreationState>> creationState(
+            @PathVariable java.util.UUID requestId, @AuthenticationPrincipal DevPilotPrincipal principal) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .body(ApiResponse.success(serverNodeService.creationState(requestId, principal)));
+    }
+
+    @PostMapping("/{id}/registration")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponse<CreateServerResponse>> renewToken(@PathVariable Long id,
+            @Valid @RequestBody com.devpilot.server.node.dto.RenewAgentTokenRequest request,
+            @AuthenticationPrincipal DevPilotPrincipal principal) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .body(ApiResponse.success(serverNodeService.renewToken(id, request, principal)));
+    }
 }

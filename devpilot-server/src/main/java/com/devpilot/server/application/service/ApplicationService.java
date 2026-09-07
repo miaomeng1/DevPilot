@@ -49,6 +49,7 @@ public class ApplicationService {
     private final ObjectMapper objectMapper;
     private final CicdPreviewMapper previewMapper;
     private final com.devpilot.server.cicd.onboarding.OnboardingMapper onboardingMapper;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     public List<ApplicationResponse> list() {
         return applicationMapper.selectAll().stream().map(this::toResponse).toList();
@@ -60,6 +61,25 @@ public class ApplicationService {
 
     @Transactional
     public ApplicationResponse create(CreateApplicationRequest request, DevPilotPrincipal principal) {
+        String requestId = request.requestId() == null ? null : request.requestId().toLowerCase(Locale.ROOT);
+        String requestHash = null;
+        if (requestId != null) {
+            // Serialize callers on an existing owner row before checking an absent key.
+            // This works across instances and avoids duplicate inserts on concurrent retries.
+            jdbc.queryForObject("SELECT id FROM sys_user WHERE id=? FOR UPDATE", Long.class, principal.userId());
+            var payload = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.valueToTree(request);
+            payload.remove("requestId");
+            requestHash = com.devpilot.server.security.SecretHashing.sha256(payload.toString());
+            var previous = jdbc.query("SELECT request_hash, application_id FROM application_creation_request WHERE created_by=? AND request_id=?",
+                    (rs, row) -> new CreationRequest(rs.getString("request_hash"), rs.getLong("application_id")), principal.userId(), requestId);
+            if (!previous.isEmpty()) {
+                var saved = previous.getFirst();
+                if (!saved.hash().equals(requestHash)) throw BusinessException.conflict(40978, "同一应用创建请求不能改变参数，请恢复原请求并核对原应用");
+                var existing = applicationMapper.selectById(saved.applicationId());
+                if (existing == null) throw BusinessException.conflict(40978, "原请求的应用已删除，不会自动重新创建");
+                return toResponse(existing);
+            }
+        }
         String code = request.code().trim().toLowerCase(Locale.ROOT);
         if (applicationMapper.selectByCode(code) != null) {
             throw BusinessException.conflict(40921, "应用编码已存在");
@@ -86,8 +106,14 @@ public class ApplicationService {
         entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
         applicationMapper.insert(entity);
+        if (requestId != null) {
+            jdbc.update("INSERT INTO application_creation_request(created_by,request_id,request_hash,application_id,created_at) VALUES (?,?,?,?,?)",
+                    principal.userId(), requestId, requestHash, entity.getId(), now);
+        }
         return toResponse(entity);
     }
+
+    private record CreationRequest(String hash, Long applicationId) { }
 
     @Transactional
     public ApplicationResponse update(Long id, UpdateApplicationRequest request) {
@@ -209,7 +235,13 @@ public class ApplicationService {
     }
 
     public long countUnhealthy() {
-        return applicationMapper.countUnhealthy();
+        return healthSummary().unhealthy();
+    }
+
+    public com.devpilot.server.application.dto.ApplicationHealthSummary healthSummary() {
+        LocalDateTime timestamp = now();
+        return com.devpilot.server.application.dto.ApplicationHealthSummary.from(
+                applicationMapper.selectHealthStates(timestamp.minusSeconds(60), timestamp.plusSeconds(5)));
     }
 
     public long countDeploymentsToday() {
@@ -246,12 +278,16 @@ public class ApplicationService {
         ServerNodeResponse server = serverNodeService.get(entity.getServerId());
         DockerContainerSnapshotEntity container = entity.getContainerSnapshotId() == null
                 ? null : containerMapper.selectById(entity.getContainerSnapshotId());
-        String status = runtimeStatus(container);
-        if (!status.equals(entity.getStatus())) {
-            entity.setStatus(status);
-            entity.setUpdatedAt(now());
-            applicationMapper.updateById(entity);
+        String observationMessage = null;
+        if (!"ONLINE".equals(server.status())) observationMessage = "Agent 不在线或状态未知，无法确认应用当前运行状态；不代表应用已停止";
+        else if (container == null) observationMessage = "尚未关联容器，等待首次部署或 Agent 运行清单";
+        else if (container.getLastSeenAt() == null || container.getLastSeenAt().isBefore(now().minusSeconds(60))
+                || container.getLastSeenAt().isAfter(now().plusSeconds(5))) {
+            observationMessage = "容器运行清单缺失或已过期，等待新的 Agent 上报；历史状态不能代表当前状态";
         }
+        String status = observationMessage == null ? runtimeStatus(container) : "UNKNOWN";
+        // Observation is derived at read time; a GET must not rewrite business
+        // state or make updatedAt look like a fresh Agent observation.
         return new ApplicationResponse(entity.getId(), entity.getName(), entity.getCode(), entity.getDescription(),
                 entity.getEnvironment(), entity.getServerId(), server.name(), entity.getDeployType(),
                 entity.getContainerSnapshotId(), container == null ? null : container.getContainerId(),
@@ -263,7 +299,8 @@ public class ApplicationService {
                 container == null ? null : container.getCpuUsage(),
                 container == null ? null : container.getMemoryUsage(),
                 container == null ? null : container.getMemoryLimit(), entity.getLastDeployedAt(),
-                entity.getCreatedAt(), entity.getUpdatedAt());
+                entity.getCreatedAt(), entity.getUpdatedAt(), server.status(),
+                container == null ? null : container.getLastSeenAt(), observationMessage);
     }
 
     private ApplicationDeploymentResponse toDeploymentResponse(ApplicationDeploymentEntity entity) {

@@ -13,6 +13,8 @@ export interface DashboardSummary {
   containerRunning: number
   applicationTotal: number
   applicationUnhealthy: number
+  applicationHealthy?: number
+  applicationUnknown?: number
   currentAlerts: number
   todayDeployments: number
   storageWarnings: number

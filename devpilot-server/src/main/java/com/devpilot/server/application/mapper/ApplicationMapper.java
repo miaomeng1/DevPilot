@@ -48,10 +48,23 @@ public interface ApplicationMapper extends BaseMapper<ApplicationEntity> {
     List<ApplicationEntity> selectByServer(@Param("serverId") Long serverId);
 
     @Select("""
-            SELECT COUNT(*) FROM application a
+            SELECT CASE
+              WHEN s.agent_status IS NULL OR s.agent_status <> 'ONLINE'
+                OR d.id IS NULL OR d.last_seen_at IS NULL
+                OR d.last_seen_at < #{freshAfter} OR d.last_seen_at > #{futureBefore} THEN 'UNKNOWN'
+              WHEN d.active = 0 OR d.state <> 'running' OR d.health = 'unhealthy' THEN 'UNHEALTHY'
+              WHEN a.health_check_url IS NOT NULL THEN
+                CASE WHEN a.health_checked_at IS NULL OR a.health_checked_at < #{freshAfter}
+                       OR a.health_checked_at > #{futureBefore} THEN 'UNKNOWN'
+                     WHEN a.health_status = 'HEALTHY' THEN 'HEALTHY'
+                     WHEN a.health_status = 'UNHEALTHY' THEN 'UNHEALTHY'
+                     ELSE 'UNKNOWN' END
+              WHEN d.health = 'healthy' THEN 'HEALTHY'
+              ELSE 'UNKNOWN' END
+            FROM application a
+            LEFT JOIN server_node s ON s.id = a.server_id
             LEFT JOIN docker_container_snapshot d ON d.id = a.container_snapshot_id
-            WHERE a.health_status = 'UNHEALTHY'
-               OR d.id IS NULL OR d.active = 0 OR d.state <> 'running' OR d.health = 'unhealthy'
             """)
-    long countUnhealthy();
+    List<String> selectHealthStates(@Param("freshAfter") LocalDateTime freshAfter,
+                                  @Param("futureBefore") LocalDateTime futureBefore);
 }

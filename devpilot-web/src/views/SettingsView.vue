@@ -25,10 +25,10 @@ const webhooks = ref<AutomationWebhook[]>([])
 const deliveries = ref<AutomationDelivery[]>([])
 const webhookName = ref('Personal automation')
 const webhookEndpoint = ref('')
-const webhookEvents = ref<AutomationEventType[]>(['ALERT_FIRING', 'ALERT_RESOLVED', 'DEPLOYMENT_HEALTHY', 'DEPLOYMENT_FAILED'])
+const webhookEvents = ref<AutomationEventType[]>(['ALERT_FIRING', 'ALERT_RESOLVED', 'DEPLOYMENT_HEALTHY', 'DEPLOYMENT_FAILED', 'BUILD_FAILED'])
 const webhookBusy = ref(false)
 const oneTimeWebhookSecret = ref('')
-const eventChoices: { value: AutomationEventType; label: string }[] = [{ value: 'ALERT_FIRING', label: '告警触发' }, { value: 'ALERT_RESOLVED', label: '告警恢复' }, { value: 'DEPLOYMENT_HEALTHY', label: '部署成功' }, { value: 'DEPLOYMENT_FAILED', label: '部署失败' }]
+const eventChoices: { value: AutomationEventType; label: string }[] = [{ value: 'ALERT_FIRING', label: '告警触发' }, { value: 'ALERT_RESOLVED', label: '告警恢复' }, { value: 'DEPLOYMENT_HEALTHY', label: '部署成功（含回滚）' }, { value: 'DEPLOYMENT_FAILED', label: '部署失败（含回滚）' }, { value: 'BUILD_FAILED', label: '构建失败 / 取消' }, { value: 'ROLLBACK_HEALTHY', label: '仅回滚成功' }, { value: 'ROLLBACK_FAILED', label: '仅回滚失败' }]
 const form = reactive<UpdateSystemSettings>({
   systemName: 'DevPilot', logoUrl: '', defaultTheme: 'LIGHT', accessTokenTtlMinutes: 120,
   refreshTokenTtlHours: 168, agentHeartbeatTimeoutSeconds: 30, metricIntervalSeconds: 10,

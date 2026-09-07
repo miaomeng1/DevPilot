@@ -51,10 +51,15 @@ public class CicdDeploymentService {
     private final MetricService metricService;
     private final AutomationWebhookService automationWebhooks;
     private final com.devpilot.server.docker.mapper.DockerContainerSnapshotMapper containers;
+    private final ManualReleaseApprovalService manualApprovals;
 
     @Transactional
     public void requestRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
         ApplicationEntity application = lockApplication(configuration.getApplicationId());
+        if (run.getManualApprovalId() == null || run.getBuildExternalRunId() == null) {
+            awaitApproval(run, "请先在 DevPilot 确认具体构建，发布回调必须携带 manualApprovalId 和来源构建");
+            return;
+        }
         CicdDeploymentEntity active = deploymentMapper.selectActive(configuration.getApplicationId());
         if (active != null) {
             queue(run, "已有发布正在执行，完成后将自动继续（deployment " + active.getId() + "）");
@@ -74,14 +79,29 @@ public class CicdDeploymentService {
     }
 
     private void startRelease(CicdConfigurationEntity configuration, CicdPipelineRunEntity run) {
+        ManualReleaseApprovalService.Approval approval;
+        try {
+            approval = manualApprovals.consume(run.getApplicationId(), run.getManualApprovalId(), run.getBuildExternalRunId(),
+                    run.getExternalRunId(), run.getCommitSha(), run.getImageUri());
+        } catch (com.devpilot.server.exception.BusinessException denied) {
+            awaitApproval(run, denied.getMessage());
+            return;
+        }
         CicdDeploymentEntity previous = deploymentMapper.selectLatestHealthy(run.getApplicationId());
         CicdDeploymentEntity deployment = create(configuration, run.getId(), null, "RELEASE", run.getImageUri(),
-                previous == null ? null : previous.getImageUri(), configuration.getCreatedBy());
+                previous == null ? null : previous.getImageUri(), Long.valueOf(approval.approvedBy()));
         run.setDeployStatus("TRIGGERING");
         run.setDeployError(null);
         run.setUpdatedAt(now());
         pipelineMapper.updateById(run);
         triggerProvider(configuration, deployment, run);
+    }
+
+    private void awaitApproval(CicdPipelineRunEntity run, String reason) {
+        run.setDeployStatus("AWAITING_APPROVAL");
+        run.setDeployError(reason);
+        run.setUpdatedAt(now());
+        pipelineMapper.updateById(run);
     }
 
     public List<CicdDeploymentResponse> list(Long applicationId) {

@@ -28,5 +28,6 @@ public record CicdConfigurationResponse(
         String previewCallbackUrl,
         String oneTimeCallbackSecret,
         String oneTimePreviewCallbackSecret,
+        String oneTimeBuildCallbackSecret,
         LocalDateTime updatedAt) {
 }

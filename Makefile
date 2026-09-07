@@ -1,4 +1,4 @@
-.PHONY: test build web agent server compose-config cicd-verify maintenance-verify dokploy-lab-start dokploy-lab-status dokploy-lab-stop
+.PHONY: test build web agent server compose-config cicd-verify workflow-verify maintenance-verify dokploy-lab-start dokploy-lab-status dokploy-lab-stop
 
 test:
 	cd devpilot-server && mvn test
@@ -22,8 +22,13 @@ compose-config:
 cicd-verify:
 	bash scripts/verify-cicd.sh
 
+workflow-verify:
+	node --experimental-strip-types scripts/test-github-workflow-lint.mjs
+
 maintenance-verify:
+	docker run --rm --network none -e DEVPILOT_AGENT_INSTALL_FIXTURE=isolated-container-only -v "$(CURDIR):/repo:ro" maven:3.9-eclipse-temurin-21 bash /repo/scripts/test-install-agent.sh
 	docker run --rm -v "$(CURDIR):/repo:ro" maven:3.9-eclipse-temurin-21 bash /repo/scripts/test-maintenance.sh
+	docker run --rm --network none -v "$(CURDIR):/repo:ro" maven:3.9-eclipse-temurin-21 bash /repo/scripts/test-install-upgrade.sh
 
 dokploy-lab-start:
 	bash scripts/dokploy-lab.sh start

@@ -25,6 +25,8 @@ public class DevPilotMetrics {
     private final AtomicLong containerRunning = new AtomicLong();
     private final AtomicLong applicationTotal = new AtomicLong();
     private final AtomicLong applicationHealthy = new AtomicLong();
+    private final AtomicLong applicationUnknown = new AtomicLong();
+    private final AtomicLong applicationUnhealthy = new AtomicLong();
     private final AtomicLong alertActive = new AtomicLong();
     private final AtomicLong alertCritical = new AtomicLong();
     private final AtomicLong snapshotSuccess = new AtomicLong();
@@ -41,7 +43,9 @@ public class DevPilotMetrics {
         gauge(registry, "devpilot.containers.discovered", "Active discovered containers", containerTotal);
         gauge(registry, "devpilot.containers.running", "Running discovered containers", containerRunning);
         gauge(registry, "devpilot.applications.managed", "Managed applications", applicationTotal);
-        gauge(registry, "devpilot.applications.healthy", "Managed applications without a known fault", applicationHealthy);
+        gauge(registry, "devpilot.applications.healthy", "Applications with fresh healthy evidence", applicationHealthy);
+        gauge(registry, "devpilot.applications.unknown", "Applications without sufficient fresh health evidence", applicationUnknown);
+        gauge(registry, "devpilot.applications.unhealthy", "Applications with fresh fault evidence", applicationUnhealthy);
         gauge(registry, "devpilot.alerts.active", "Active or acknowledged alerts", alertActive);
         gauge(registry, "devpilot.alerts.critical", "Active critical alerts", alertCritical);
         gauge(registry, "devpilot.metrics.snapshot.success", "Whether the latest control-plane snapshot succeeded", snapshotSuccess);
@@ -50,13 +54,17 @@ public class DevPilotMetrics {
     @Scheduled(fixedDelayString = "${devpilot.observability.snapshot-interval-ms:30000}", initialDelay = 5000)
     public void refresh() {
         try {
-            long appTotal = applications.countAll();
+            var timestamp = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC);
+            var appHealth = com.devpilot.server.application.dto.ApplicationHealthSummary.from(
+                    applications.selectHealthStates(timestamp.minusSeconds(60), timestamp.plusSeconds(5)));
             serverTotal.set(servers.countAllActive());
             serverOnline.set(servers.countOnline());
             containerTotal.set(containers.countAllActive());
             containerRunning.set(containers.countRunning());
-            applicationTotal.set(appTotal);
-            applicationHealthy.set(Math.max(0, appTotal - applications.countUnhealthy()));
+            applicationTotal.set(appHealth.total());
+            applicationHealthy.set(appHealth.healthy());
+            applicationUnknown.set(appHealth.unknown());
+            applicationUnhealthy.set(appHealth.unhealthy());
             alertActive.set(alerts.countActive());
             alertCritical.set(alerts.countActiveCritical());
             snapshotSuccess.set(1);

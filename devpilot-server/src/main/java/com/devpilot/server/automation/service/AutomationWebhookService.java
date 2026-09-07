@@ -2,6 +2,7 @@ package com.devpilot.server.automation.service;
 
 import com.devpilot.server.alert.entity.AlertEventEntity;
 import com.devpilot.server.application.entity.ApplicationEntity;
+import com.devpilot.server.application.mapper.ApplicationMapper;
 import com.devpilot.server.automation.dto.AutomationDeliveryResponse;
 import com.devpilot.server.automation.dto.AutomationWebhookRequest;
 import com.devpilot.server.automation.dto.AutomationWebhookResponse;
@@ -11,6 +12,7 @@ import com.devpilot.server.automation.entity.AutomationWebhookSubscriptionEntity
 import com.devpilot.server.automation.mapper.AutomationWebhookDeliveryMapper;
 import com.devpilot.server.automation.mapper.AutomationWebhookSubscriptionMapper;
 import com.devpilot.server.cicd.entity.CicdDeploymentEntity;
+import com.devpilot.server.cicd.entity.CicdPipelineRunEntity;
 import com.devpilot.server.exception.BusinessException;
 import com.devpilot.server.security.DevPilotPrincipal;
 import com.devpilot.server.security.SensitiveSettingCipher;
@@ -34,11 +36,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class AutomationWebhookService {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> ALLOWED = Set.of("ALERT_FIRING", "ALERT_RESOLVED",
-            "DEPLOYMENT_HEALTHY", "DEPLOYMENT_FAILED");
+            "DEPLOYMENT_HEALTHY", "DEPLOYMENT_FAILED", "BUILD_FAILED", "ROLLBACK_HEALTHY", "ROLLBACK_FAILED");
     private final AutomationWebhookSubscriptionMapper subscriptionMapper;
     private final AutomationWebhookDeliveryMapper deliveryMapper;
     private final SensitiveSettingCipher cipher;
     private final ObjectMapper objectMapper;
+    private final ApplicationMapper applicationMapper;
 
     public List<AutomationWebhookResponse> subscriptions() {
         return subscriptionMapper.selectAll().stream().map(AutomationWebhookService::response).toList();
@@ -94,13 +97,14 @@ public class AutomationWebhookService {
         if (delivery.getSubscriptionId() == null || subscriptionMapper.selectById(delivery.getSubscriptionId()) == null) {
             throw BusinessException.conflict(40973, "订阅已删除，无法重发");
         }
-        delivery.setStatus("PENDING");
-        delivery.setAttemptCount(0);
-        delivery.setResponseCode(null);
-        delivery.setErrorMessage(null);
-        delivery.setNextAttemptAt(now());
-        delivery.setUpdatedAt(now());
-        deliveryMapper.updateById(delivery);
+        LocalDateTime timestamp = now();
+        int changed = deliveryMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<AutomationWebhookDeliveryEntity>()
+                        .eq("id", id).eq("status", "FAILED").eq("attempt_count", delivery.getAttemptCount())
+                        .set("status", "PENDING").set("attempt_count", 0).set("response_code", null)
+                        .set("error_message", null).set("sent_at", null)
+                        .set("next_attempt_at", timestamp).set("updated_at", timestamp));
+        if (changed != 1) throw BusinessException.conflict(40973, "只能重试仍处于失败状态的投递；请刷新后核对，成功或已排队的事件不会再次重发");
     }
 
     @Transactional
@@ -114,6 +118,26 @@ public class AutomationWebhookService {
         data.put("severity", alert.getSeverity());
         data.put("status", alert.getStatus());
         data.put("message", alert.getMessage());
+        data.put("reason", "RESOLVED".equals(transition)
+                ? "告警已解除（RESOLVED）；规则变更也可能解除告警，请核对健康恢复证据" : alert.getMessage());
+        data.put("detailsPath", "/alerts");
+        if ("APPLICATION".equals(alert.getResourceType())) {
+            Long applicationId = null;
+            try {
+                applicationId = Long.valueOf(alert.getResourceId());
+            } catch (NumberFormatException ignored) {
+                // Historical/missing resources still need a usable alert notification.
+            }
+            ApplicationEntity application = applicationId == null ? null : applicationMapper.selectById(applicationId);
+            if (application != null && alert.getServerId().equals(application.getServerId())) {
+                data.put("applicationId", application.getId().toString());
+                data.put("applicationName", application.getName());
+                data.put("environment", application.getEnvironment());
+                // This is the saved application version, not fresh Agent/digest evidence.
+                data.put("recordedVersion", application.getCurrentVersion());
+                data.put("detailsPath", "/applications/" + application.getId());
+            }
+        }
         publish("ALERT_" + transition, "alert/" + alert.getId(), data);
     }
 
@@ -129,8 +153,33 @@ public class AutomationWebhookService {
         data.put("provider", deployment.getProvider());
         data.put("image", deployment.getImageUri());
         data.put("status", deployment.getStatus());
+        data.put("detailsPath", "/cicd?application=" + application.getId());
+        data.put("reason", healthy ? "健康验证通过" : "部署未通过，请查看部署记录与日志");
         publish(healthy ? "DEPLOYMENT_HEALTHY" : "DEPLOYMENT_FAILED",
                 "deployment/" + deployment.getId(), data);
+        // Keep existing deployment subscriptions compatible; rollback-specific subscriptions are opt-in.
+        if ("ROLLBACK".equals(deployment.getDeploymentKind())) {
+            publish(healthy ? "ROLLBACK_HEALTHY" : "ROLLBACK_FAILED", "deployment/" + deployment.getId(), data);
+        }
+    }
+
+    @Transactional
+    public void publishBuildFailure(CicdPipelineRunEntity run, ApplicationEntity application) {
+        ObjectNode data = objectMapper.createObjectNode();
+        data.put("pipelineRunId", run.getId().toString());
+        data.put("externalRunId", run.getExternalRunId());
+        data.put("applicationId", application.getId().toString());
+        data.put("applicationName", application.getName());
+        data.put("environment", application.getEnvironment());
+        data.put("commit", run.getCommitSha());
+        data.put("image", run.getImageUri());
+        data.put("status", run.getStatus());
+        data.put("testStatus", run.getTestStatus());
+        data.put("securityStatus", run.getSecurityStatus());
+        // Do not forward arbitrary CI summary/log text, which may contain credentials.
+        data.put("reason", "构建未成功，请查看测试、安全扫描及构建任务结果");
+        data.put("detailsPath", "/cicd?application=" + application.getId());
+        publish("BUILD_FAILED", "build/" + run.getId(), data);
     }
 
     private void publish(String eventType, String subject, ObjectNode data) {

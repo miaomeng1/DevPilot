@@ -30,5 +30,8 @@ public record ApplicationResponse(
         Long memoryLimit,
         LocalDateTime lastDeployedAt,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        String agentStatus,
+        LocalDateTime containerObservedAt,
+        String runtimeObservationMessage) {
 }

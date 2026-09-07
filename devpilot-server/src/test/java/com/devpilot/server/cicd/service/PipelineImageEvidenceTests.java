@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class PipelineImageEvidenceTests {
     private PipelineCallbackRequest callback(String image, String digest) {
         return new PipelineCallbackRequest("run", "SUCCEEDED", "PASSED", "PASSED", "a".repeat(40),
-                "main", image, digest, null, null);
+                "main", image, digest, null, null, null, null, null, null);
     }
     @Test void matchingDigestAcceptedButContradictoryEvidenceRejected() {
         String digest = "sha256:" + "a".repeat(64);

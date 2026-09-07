@@ -14,6 +14,9 @@ public record PipelineCallbackRequest(
         @Size(max = 1000) String imageUri,
         @Size(max = 255) String imageDigest,
         @Size(max = 1000) String runUrl,
-        @Size(max = 8000) String summary) {
+        @Size(max = 8000) String summary,
+        @Size(max = 255) String buildExternalRunId,
+        @Size(max = 255) String approvalActor,
+        java.time.Instant approvedAt,
+        @jakarta.validation.constraints.Pattern(regexp = "[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}") String manualApprovalId) {
 }
-

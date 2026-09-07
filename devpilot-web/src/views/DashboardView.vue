@@ -13,6 +13,7 @@ const range = ref<DashboardRange>('1h')
 const data = ref<DashboardData>()
 const loading = ref(false)
 const errorMessage = ref('')
+const refreshFailed = ref(false)
 let pollTimer: number | undefined
 
 const summary = computed(() => data.value?.summary ?? {
@@ -23,7 +24,7 @@ const summary = computed(() => data.value?.summary ?? {
 const cards = computed(() => [
   { label: '服务器 Servers', value: summary.value.serverTotal, detail: `${summary.value.serverOnline} 台在线`, tone: 'blue' },
   { label: '容器 Docker', value: summary.value.containerTotal, detail: `${summary.value.containerRunning} 个运行中`, tone: 'violet' },
-  { label: '应用 Applications', value: summary.value.applicationTotal, detail: `${summary.value.applicationUnhealthy} 个异常`, tone: 'cyan' },
+  { label: '应用 Applications', value: summary.value.applicationTotal, detail: `${summary.value.applicationUnhealthy} 个异常 · ${summary.value.applicationUnknown ?? '—'} 个未知`, tone: 'cyan' },
   { label: '待处理 Alerts', value: summary.value.currentAlerts, detail: `今日 ${summary.value.todayDeployments} 次发布`, tone: 'green' },
 ])
 const actionItems = computed(() => {
@@ -44,7 +45,9 @@ const actionItems = computed(() => {
       ? { tone: 'setup', mark: '3', label: '纳管你的第一个应用', detail: '从已发现容器一键导入', action: '自动发现', to: '/applications' }
       : summary.value.applicationUnhealthy > 0
         ? { tone: 'attention', mark: '!', label: `${summary.value.applicationUnhealthy} 个应用需要处理`, detail: '运行状态或健康检查异常', action: '定位问题', to: '/applications' }
-        : { tone: 'done', mark: '✓', label: '应用健康检查正常', detail: `${summary.value.applicationTotal} 个服务已纳管`, action: '查看', to: '/applications' },
+        : (summary.value.applicationUnknown === undefined || summary.value.applicationUnknown > 0)
+          ? { tone: 'attention', mark: '?', label: '部分应用健康状态待确认', detail: '检查 Agent、采集时间与健康探测，未知不代表故障', action: '核对证据', to: '/applications' }
+          : { tone: 'done', mark: '✓', label: '应用最近健康证据正常', detail: `${summary.value.applicationHealthy ?? 0} 个应用有新鲜健康证据`, action: '查看', to: '/applications' },
     summary.value.currentAlerts > 0
       ? { tone: 'attention', mark: '!', label: `${summary.value.currentAlerts} 条活动告警`, detail: '请确认影响并处理或确认告警', action: '进入告警', to: '/alerts' }
       : { tone: 'done', mark: '✓', label: '当前没有活动告警', detail: '所有已配置指标均在阈值内', action: '告警策略', to: '/alerts/rules' },
@@ -80,7 +83,9 @@ async function load(silent = false) {
   errorMessage.value = ''
   try {
     data.value = await dashboardApi.get(range.value)
+    refreshFailed.value = false
   } catch (error) {
+    refreshFailed.value = true
     errorMessage.value = apiErrorMessage(error, 'Dashboard 数据加载失败')
   } finally {
     loading.value = false
@@ -119,6 +124,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
     </header>
 
     <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
+    <p v-if="refreshFailed" class="inline-error" role="status">刷新失败，当前保留的是历史快照，健康数量及状态不代表实时结果。</p>
     <div class="summary-grid" :class="{ 'is-loading': loading && !data }">
       <article v-for="item in cards" :key="item.label" :class="`tone-${item.tone}`">
         <div><span>{{ item.label }}</span><i /></div><strong>{{ item.value }}</strong><small>{{ item.detail }}</small>
@@ -134,7 +140,7 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       </article>
 
       <article class="empty-panel readiness-panel">
-        <header><div><strong>行动中心 Action center</strong><small>按优先级给出下一步操作</small></div><span class="ready-pill">LIVE</span></header>
+        <header><div><strong>行动中心 Action center</strong><small>按优先级给出下一步操作</small></div><span class="ready-pill">{{ refreshFailed ? '历史快照' : '最近采样' }}</span></header>
         <ol>
           <li v-for="item in actionItems" :key="item.label" :class="item.tone"><b>{{ item.mark }}</b><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><RouterLink :to="item.to">{{ item.action }} →</RouterLink></li>
         </ol>

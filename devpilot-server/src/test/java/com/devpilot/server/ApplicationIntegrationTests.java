@@ -32,6 +32,84 @@ class ApplicationIntegrationTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Test
+    void applicationCreationReplaysExactRequestAndNeverRecreatesDeletedApplication() throws Exception {
+        String token = setupAdministrator();
+        String serverId = data(mockMvc.perform(post("/api/servers").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"retry-fixture\"}")).andExpect(status().isOk()).andReturn())
+                .path("server").path("id").asText();
+        String request = creationRequest(serverId, "retry-app", "ABCDEF12-1234-1234-1234-123456789012");
+        var first = data(mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isOk()).andReturn());
+        var replay = data(mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request.replace("ABCDEF12", "abcdef12"))).andExpect(status().isOk()).andReturn());
+        org.junit.jupiter.api.Assertions.assertEquals(first.path("id"), replay.path("id"));
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application", Long.class));
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request.replace("retry-app", "changed-app")))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is(40978)));
+        jdbcTemplate.update("DELETE FROM application WHERE id=?", first.path("id").asText());
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40978)));
+        org.junit.jupiter.api.Assertions.assertEquals(0L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application", Long.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application_creation_request", Long.class));
+    }
+
+    @Test
+    void concurrentApplicationCreationRequestsReturnOneApplication() throws Exception {
+        String token = setupAdministrator();
+        String serverId = data(mockMvc.perform(post("/api/servers").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"parallel-fixture\"}")).andExpect(status().isOk()).andReturn())
+                .path("server").path("id").asText();
+        String request = creationRequest(serverId, "parallel-app", "abcdef12-1234-1234-1234-123456789012");
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var calls = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+            for (int i = 0; i < 4; i++) calls.add(executor.submit(() -> {
+                start.await();
+                return data(mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isOk()).andReturn()).path("id").asText();
+            }));
+            start.countDown();
+            var ids = new java.util.HashSet<String>();
+            for (var call : calls) ids.add(call.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            org.junit.jupiter.api.Assertions.assertEquals(1, ids.size());
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application", Long.class));
+        org.junit.jupiter.api.Assertions.assertEquals(1L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application_creation_request", Long.class));
+    }
+
+    @Test
+    void applicationCreationRequestBelongsToAuthenticatedOwner() throws Exception {
+        String token = setupAdministrator();
+        String serverId = data(mockMvc.perform(post("/api/servers").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"owner-fixture\"}")).andExpect(status().isOk()).andReturn())
+                .path("server").path("id").asText();
+        String request = creationRequest(serverId, "owner-app", "abcdef12-1234-1234-1234-123456789012");
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isOk());
+        mockMvc.perform(post("/api/users").header(HttpHeaders.AUTHORIZATION, "Bearer " + token).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"username\":\"retrydeveloper\",\"displayName\":\"Retry developer\",\"email\":\"\",\"role\":\"DEVELOPER\",\"password\":\"Fixture-Password-2026!\",\"confirmPassword\":\"Fixture-Password-2026!\"}"))
+                .andExpect(status().isOk());
+        String other = data(mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"username\":\"retrydeveloper\",\"password\":\"Fixture-Password-2026!\"}")).andExpect(status().isOk()).andReturn()).path("accessToken").asText();
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + other)
+                .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code", is(40921)));
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + other)
+                .contentType(MediaType.APPLICATION_JSON).content(request.replace("owner-app", "other-app"))).andExpect(status().isOk());
+        org.junit.jupiter.api.Assertions.assertEquals(2L, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM application_creation_request", Long.class));
+        mockMvc.perform(post("/api/applications").header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON).content(request.replace("abcdef12-1234-1234-1234-123456789012", "invalid")))
+                .andExpect(status().isBadRequest());
+    }
+
+    private static String creationRequest(String serverId, String code, String requestId) {
+        return "{\"name\":\"Retry fixture\",\"code\":\"%s\",\"environment\":\"PRODUCTION\",\"serverId\":\"%s\",\"requestId\":\"%s\"}"
+                .formatted(code, serverId, requestId);
+    }
+
     @BeforeEach
     void resetDatabase() {
         TestDatabaseReset.reset(jdbcTemplate);

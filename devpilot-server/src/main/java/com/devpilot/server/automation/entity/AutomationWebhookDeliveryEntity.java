@@ -24,4 +24,6 @@ public class AutomationWebhookDeliveryEntity {
     private LocalDateTime sentAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    private String claimToken;
+    private LocalDateTime claimExpiresAt;
 }

@@ -22,10 +22,16 @@ public class CicdPipelineRunEntity {
     private String imageDigest;
     private String runUrl;
     private String summary;
+    private String buildExternalRunId;
+    private String approvalActor;
+    private String manualApprovalId;
+    private LocalDateTime approvedAt;
     private String deployStatus;
     private String deployError;
     private LocalDateTime startedAt;
     private LocalDateTime completedAt;
     private LocalDateTime updatedAt;
+    private LocalDateTime githubCheckedAt;
+    private String githubObservation;
+    private String buildResultSource;
 }
-

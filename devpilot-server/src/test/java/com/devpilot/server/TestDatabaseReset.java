@@ -21,6 +21,7 @@ final class TestDatabaseReset {
             for (String table : tables) {
                 jdbcTemplate.execute("TRUNCATE TABLE \"" + table.replace("\"", "\"\"") + "\"");
             }
+            jdbcTemplate.update("INSERT INTO platform_setup(id, revision) VALUES (1, 'initial')");
         } finally {
             jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY TRUE");
         }

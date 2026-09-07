@@ -19,6 +19,7 @@ public record PipelineRunResponse(
         String deployError,
         LocalDateTime startedAt,
         LocalDateTime completedAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        String buildExternalRunId, String approvalActor, LocalDateTime approvedAt, String manualApprovalId,
+        String observationStatus, String observationMessage) {
 }
-

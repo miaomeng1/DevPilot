@@ -75,7 +75,9 @@ public class AlertEvaluationService {
         Set<String> observedKeys = new HashSet<>();
         for (Observation observation : observations) {
             observedKeys.add(observation.key());
-            if (observation.conditionMet()) {
+            if (observation.conditionMet() == null) {
+                recordUnknown(rule, observation.resourceType(), observation.resourceId());
+            } else if (observation.conditionMet()) {
                 recordTrue(rule, observation, now);
             } else {
                 recordFalse(rule, observation.resourceType(), observation.resourceId(), now);
@@ -84,7 +86,7 @@ public class AlertEvaluationService {
         for (AlertConditionStateEntity stale : conditionMapper.selectByRule(rule.getId())) {
             String key = stale.getResourceType() + ":" + stale.getResourceId();
             if (!observedKeys.contains(key)) {
-                recordFalse(rule, stale.getResourceType(), stale.getResourceId(), now);
+                recordUnknown(rule, stale.getResourceType(), stale.getResourceId());
             }
         }
     }
@@ -97,36 +99,44 @@ public class AlertEvaluationService {
             switch (rule.getMetricType()) {
                 case "SERVER_CPU", "SERVER_MEMORY", "SERVER_DISK" -> {
                     ServerMetricEntity metric = metricMapper.selectLatest(server.getId());
-                    Double value = metricValue(rule.getMetricType(), metric, now);
+                    Double value = "ONLINE".equals(server.getAgentStatus())
+                            ? metricValue(rule.getMetricType(), metric, now) : null;
                     result.add(new Observation(server.getId(), "SERVER", server.getId().toString(), server.getName(),
-                            value, value != null && compare(value, rule.getOperator(), rule.getThreshold())));
+                            value, value == null ? null : compare(value, rule.getOperator(), rule.getThreshold())));
                 }
                 case "AGENT_OFFLINE" -> result.add(new Observation(server.getId(), "SERVER",
                         server.getId().toString(), server.getName(), 1.0,
                         !"ONLINE".equals(server.getAgentStatus())));
                 case "CONTAINER_STOPPED" -> {
                     for (DockerContainerSnapshotEntity container : containerMapper.selectActive(server.getId())) {
+                        boolean fresh = "ONLINE".equals(server.getAgentStatus())
+                                && fresh(container.getLastSeenAt(), now, 60);
                         result.add(new Observation(server.getId(), "CONTAINER", container.getId().toString(),
                                 container.getName(), "running".equalsIgnoreCase(container.getState()) ? 0.0 : 1.0,
-                                !"running".equalsIgnoreCase(container.getState())));
+                                fresh ? !"running".equalsIgnoreCase(container.getState()) : null));
                     }
                 }
                 case "CONTAINER_RESTARTS" -> {
                     for (DockerContainerSnapshotEntity container : containerMapper.selectActive(server.getId())) {
+                        boolean fresh = "ONLINE".equals(server.getAgentStatus())
+                                && fresh(container.getLastSeenAt(), now, 60);
                         boolean freshWindow = container.getRestartWindowStartedAt() != null
                                 && !container.getRestartWindowStartedAt().isBefore(now.minusMinutes(10));
                         double restarts = freshWindow && container.getRestartWindowCount() != null
                                 ? container.getRestartWindowCount() : 0.0;
                         result.add(new Observation(server.getId(), "CONTAINER", container.getId().toString(),
                                 container.getName(), restarts,
-                                compare(restarts, rule.getOperator(), rule.getThreshold())));
+                                fresh ? compare(restarts, rule.getOperator(), rule.getThreshold()) : null));
                     }
                 }
                 case "APP_UNHEALTHY" -> {
                     for (ApplicationEntity application : applicationMapper.selectByServer(server.getId())) {
                         boolean unhealthy = "UNHEALTHY".equals(application.getHealthStatus());
+                        boolean known = "ONLINE".equals(server.getAgentStatus())
+                                && fresh(application.getHealthCheckedAt(), now, 60)
+                                && (unhealthy || "HEALTHY".equals(application.getHealthStatus()));
                         result.add(new Observation(server.getId(), "APPLICATION", application.getId().toString(),
-                                application.getName(), unhealthy ? 1.0 : 0.0, unhealthy));
+                                application.getName(), unhealthy ? 1.0 : 0.0, known ? unhealthy : null));
                     }
                 }
                 default -> log.warn("Unknown alert metric type {}", rule.getMetricType());
@@ -183,6 +193,13 @@ public class AlertEvaluationService {
         }
     }
 
+    private void recordUnknown(AlertRuleEntity rule, String resourceType, String resourceId) {
+        // Missing samples break a continuous-duration condition, but cannot prove
+        // that an already firing/acknowledged incident has recovered.
+        AlertConditionStateEntity state = conditionMapper.selectResource(rule.getId(), resourceType, resourceId);
+        if (state != null) conditionMapper.deleteById(state.getId());
+    }
+
     private void recordFalse(AlertRuleEntity rule, String resourceType, String resourceId, LocalDateTime now) {
         AlertConditionStateEntity state = conditionMapper.selectResource(rule.getId(), resourceType, resourceId);
         if (state != null) {
@@ -236,7 +253,7 @@ public class AlertEvaluationService {
     }
 
     private static Double metricValue(String type, ServerMetricEntity metric, LocalDateTime now) {
-        if (metric == null || metric.getCollectedAt().isBefore(now.minusSeconds(METRIC_STALE_SECONDS))) {
+        if (metric == null || !fresh(metric.getCollectedAt(), now, METRIC_STALE_SECONDS)) {
             return null;
         }
         return switch (type) {
@@ -245,6 +262,11 @@ public class AlertEvaluationService {
             case "SERVER_DISK" -> percentage(metric.getDiskUsed(), metric.getDiskTotal());
             default -> null;
         };
+    }
+
+    private static boolean fresh(LocalDateTime observedAt, LocalDateTime now, int seconds) {
+        return observedAt != null && !observedAt.isBefore(now.minusSeconds(seconds))
+                && !observedAt.isAfter(now.plusSeconds(5));
     }
 
     private static boolean compare(double value, String operator, double threshold) {
@@ -296,7 +318,7 @@ public class AlertEvaluationService {
     }
 
     private record Observation(Long serverId, String resourceType, String resourceId,
-                               String resourceName, Double value, boolean conditionMet) {
+                               String resourceName, Double value, Boolean conditionMet) {
         String key() {
             return resourceType + ":" + resourceId;
         }

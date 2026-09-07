@@ -27,7 +27,17 @@ export interface CreateServerResult {
   installCommand: string
 }
 
+export interface ServerCreationState {
+  serverId: string
+  name: string
+  status: 'AVAILABLE' | 'EXPIRED' | 'UNAVAILABLE' | 'DELETED'
+}
+
 export const serverApi = {
+  async creationState(requestId: string) {
+    const response = await apiClient.get<ApiResponse<ServerCreationState>>(`/servers/creation-requests/${requestId}`)
+    return response.data.data
+  },
   async list() {
     const response = await apiClient.get<ApiResponse<ServerNode[]>>('/servers')
     return response.data.data
@@ -38,12 +48,22 @@ export const serverApi = {
     return response.data.data
   },
 
-  async create(name: string) {
-    const response = await apiClient.post<ApiResponse<CreateServerResult>>('/servers', { name })
+  async create(name: string, requestId?: string) {
+    const response = await apiClient.post<ApiResponse<CreateServerResult>>('/servers', { name, requestId })
     return response.data.data
   },
 
   async delete(id: string) {
     await apiClient.delete(`/servers/${id}`)
+  },
+
+  async registration(id: string) {
+    const response = await apiClient.get<ApiResponse<{ revision: string }>>(`/servers/${id}/registration`)
+    return response.data.data
+  },
+
+  async renewToken(id: string, request: { requestId: string; expectedRevision: string; confirmed: boolean }) {
+    const response = await apiClient.post<ApiResponse<CreateServerResult>>(`/servers/${id}/registration`, request)
+    return response.data.data
   },
 }

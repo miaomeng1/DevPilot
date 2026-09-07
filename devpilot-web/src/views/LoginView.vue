@@ -59,7 +59,7 @@ async function submit() {
     } else {
       await auth.login(loginForm)
     }
-    const requested = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
+    const requested = isSetup.value ? '/setup' : typeof route.query.redirect === 'string' ? route.query.redirect : '/'
     const destination = requested.startsWith('/') && !requested.startsWith('//') ? requested : '/'
     await router.replace(destination)
   } catch (error) {

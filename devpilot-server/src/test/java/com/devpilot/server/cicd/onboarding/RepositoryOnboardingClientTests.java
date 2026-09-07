@@ -11,6 +11,37 @@ import org.junit.jupiter.api.Test;
 
 class RepositoryOnboardingClientTests {
     @Test
+    void gitlabBuildAndReleaseSecretsHaveSeparateProtectedScopes() throws Exception {
+        var http = mock(OnboardingHttpClient.class);
+        var request = mock(OnboardingRequest.class);
+        when(request.repositoryProvider()).thenReturn("GITLAB");
+        when(request.repositoryToken()).thenReturn("fixture-token");
+        when(request.branch()).thenReturn("main");
+        when(request.publicBaseUrl()).thenReturn("https://ops.example");
+        String api = "https://gitlab.example/api/v4/projects/12";
+        var repo = new RepositoryOnboardingClient.Repository(api, "example/demo", "main", "registry.example/demo", "", "DOCKER", "https://gitlab.example/example/demo");
+        when(http.call("GITLAB", "fixture-token", "GET", api + "/repository/branches/main", null))
+                .thenReturn(new ObjectMapper().createObjectNode().put("protected", true));
+        new RepositoryOnboardingClient(http).configureSecrets(request, repo, "demo", "fixture-release-secret");
+        var values = Map.of("DEVPILOT_CICD_CALLBACK_URL", "https://ops.example/api/cicd/webhooks/demo",
+                "DEVPILOT_CICD_CALLBACK_SECRET", "fixture-release-secret",
+                "DEVPILOT_BUILD_CALLBACK_URL", "https://ops.example/api/cicd/webhooks/demo/builds",
+                "DEVPILOT_BUILD_CALLBACK_SECRET", com.devpilot.server.cicd.service.BuildStatusKey.derive("fixture-release-secret"));
+        for (var value : values.entrySet()) {
+            String scope = value.getKey().startsWith("DEVPILOT_BUILD_") ? "build-status-demo" : "production-demo";
+            verify(http).call("GITLAB", "fixture-token", "POST", api + "/variables", Map.of(
+                    "key", value.getKey(), "value", value.getValue(), "environment_scope", scope,
+                    "protected", true, "masked", true, "raw", true));
+        }
+        verify(http, times(4)).call(eq("GITLAB"), eq("fixture-token"), eq("POST"), eq(api + "/variables"), any());
+        reset(http);
+        when(http.call("GITLAB", "fixture-token", "GET", api + "/repository/branches/main", null))
+                .thenReturn(new ObjectMapper().createObjectNode().put("protected", false));
+        assertThrows(IllegalArgumentException.class, () -> new RepositoryOnboardingClient(http).configureSecrets(request, repo, "demo", "fixture-release-secret"));
+        verify(http, never()).call(anyString(), anyString(), eq("POST"), anyString(), any());
+    }
+
+    @Test
     void dokployMissingPermissionsFailBeforeAnyWrite() throws Exception {
         var http = mock(OnboardingHttpClient.class);
         var request = mock(OnboardingRequest.class);

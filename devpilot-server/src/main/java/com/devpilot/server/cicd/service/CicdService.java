@@ -43,8 +43,11 @@ public class CicdService {
     private final ApplicationMapper applicationMapper;
     private final SensitiveSettingCipher cipher;
     private final CicdDeploymentService deploymentService;
+    private final com.devpilot.server.automation.service.AutomationWebhookService automationWebhooks;
     private final ObjectMapper objectMapper;
     private final Validator validator;
+    @org.springframework.beans.factory.annotation.Value("${devpilot.cicd.running-stale-after:2h}")
+    private java.time.Duration runningStaleAfter;
 
     public CicdConfigurationResponse getConfiguration(Long applicationId) {
         ApplicationEntity application = requireApplication(applicationId);
@@ -150,18 +153,27 @@ public class CicdService {
         }
         if (create || Boolean.TRUE.equals(request.rotateCallbackSecret())) {
             configurationMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<CicdConfigurationEntity>()
-                    .eq("id", entity.getId()).set("callback_verified_at", null));
+                    .eq("id", entity.getId()).set("callback_verified_at", null).set("build_callback_verified_at", null));
         }
         return toConfiguration(entity, application, oneTimeSecret, oneTimePreviewSecret);
     }
 
     public List<PipelineRunResponse> listRuns(Long applicationId) {
         requireApplication(applicationId);
-        return pipelineMapper.selectRecent(applicationId, 100).stream().map(CicdService::toRun).toList();
+        return pipelineMapper.selectRecent(applicationId, 100).stream().map(this::toRun).toList();
     }
 
     @Transactional
     public PipelineRunResponse receive(String applicationCode, String signature, byte[] rawBody) {
+        return receiveEvent(applicationCode, signature, rawBody, false);
+    }
+
+    @Transactional
+    public PipelineRunResponse receiveBuild(String applicationCode, String signature, byte[] rawBody) {
+        return receiveEvent(applicationCode, signature, rawBody, true);
+    }
+
+    private PipelineRunResponse receiveEvent(String applicationCode, String signature, byte[] rawBody, boolean buildOnly) {
         ApplicationEntity application = applicationMapper.selectByCode(applicationCode);
         if (application == null) {
             throw BusinessException.notFound(40420, "应用不存在");
@@ -171,7 +183,8 @@ public class CicdService {
         if (configuration == null) {
             throw BusinessException.notFound(40440, "CI/CD 配置不存在");
         }
-        verifySignature(signature, rawBody, cipher.decrypt(configuration.getCallbackSecretCipher()));
+        String releaseKey = cipher.decrypt(configuration.getCallbackSecretCipher());
+        verifySignature(signature, rawBody, buildOnly ? BuildStatusKey.derive(releaseKey) : releaseKey);
         PipelineCallbackRequest request;
         try {
             request = objectMapper.readValue(rawBody, PipelineCallbackRequest.class);
@@ -182,15 +195,63 @@ public class CicdService {
         if (!violations.isEmpty()) {
             throw BusinessException.badRequest(40041, "流水线回调字段无效: " + violations.getFirst());
         }
+        if (trimToNull(request.runUrl()) != null) validateHttpUrl(request.runUrl(), "CI 任务链接");
         if (!configuration.getBranchName().equals(request.branchName())) {
             throw BusinessException.badRequest(40042, "回调分支与应用配置不一致");
         }
+        if (buildOnly != request.externalRunId().startsWith("build:")) {
+            throw BusinessException.badRequest(40041, "构建状态与发布回调必须使用独立的 Run ID 命名空间");
+        }
         validateSuccessfulGate(request);
+        if (buildOnly && "SUCCEEDED".equals(request.status()) && (request.imageUri() == null
+                || !request.imageUri().matches(".+@sha256:[a-f0-9]{64}$"))) {
+            throw BusinessException.badRequest(40050, "待发布构建必须提供完整镜像 digest，不能使用 tag");
+        }
+        if (buildOnly && (request.buildExternalRunId() != null || request.approvalActor() != null || request.approvedAt() != null || request.manualApprovalId() != null)) {
+            throw BusinessException.badRequest(40041, "构建状态上报不能声明发布确认");
+        }
+        if (!buildOnly && request.buildExternalRunId() != null) {
+            var source = pipelineMapper.selectByExternalRunId(application.getId(), request.buildExternalRunId());
+            if (!request.buildExternalRunId().startsWith("build:") || source == null || !"SUCCEEDED".equals(source.getStatus())
+                    || !source.getCommitSha().equalsIgnoreCase(request.commitSha())
+                    || !java.util.Objects.equals(source.getImageUri(), request.imageUri())) {
+                throw BusinessException.badRequest(40050, "发布必须引用本应用已通过的构建，提交与镜像 digest 必须一致");
+            }
+            if (request.approvalActor() == null || request.approvalActor().isBlank() || request.approvedAt() == null
+                    || request.approvedAt().isAfter(java.time.Instant.now().plusSeconds(300))) {
+                throw BusinessException.badRequest(40050, "关联构建的发布必须提供有效的 CI 发起人和任务开始时间；该记录不等同于人工审批证据");
+            }
+        } else if (!buildOnly && (request.approvalActor() != null || request.approvedAt() != null)) {
+            throw BusinessException.badRequest(40050, "CI 发布发起信息必须关联构建记录");
+        }
         configurationMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<CicdConfigurationEntity>()
                 .eq("id", configuration.getId()).eq("callback_secret_cipher", configuration.getCallbackSecretCipher())
-                .set("callback_verified_at", now()));
+                .set(buildOnly ? "build_callback_verified_at" : "callback_verified_at", now()));
         CicdPipelineRunEntity run = pipelineMapper.selectByExternalRunId(application.getId(), request.externalRunId());
         boolean create = run == null;
+        if (!buildOnly && run != null && run.getBuildExternalRunId() != null && terminal(run.getStatus())) {
+            if (!java.util.Objects.equals(run.getBuildExternalRunId(), request.buildExternalRunId())
+                    || !java.util.Objects.equals(run.getImageUri(), request.imageUri())
+                    || !java.util.Objects.equals(run.getApprovalActor(), request.approvalActor())
+                    || !run.getCommitSha().equalsIgnoreCase(request.commitSha())) {
+                throw BusinessException.conflict(40941, "已完成发布的来源及 CI 发起人不能修改");
+            }
+            if (!"AWAITING_APPROVAL".equals(run.getDeployStatus()) || !"SUCCEEDED".equals(request.status())) {
+                if (!java.util.Objects.equals(run.getManualApprovalId(), request.manualApprovalId())) throw BusinessException.conflict(40941, "已提交发布的人工确认不能更换");
+                return toRun(run);
+            }
+        }
+        if (buildOnly && run != null) {
+            if (!run.getCommitSha().equalsIgnoreCase(request.commitSha())) throw BusinessException.conflict(40941, "同一构建不能改变提交");
+            if (terminal(run.getStatus())) {
+                // A workflow can fail only because its callback delivery failed.
+                // A signed final build report may supersede a read-only observation,
+                // but cannot overwrite a previous signed final result or regress to RUNNING.
+                boolean observedFailure = "GITHUB_OBSERVATION".equals(run.getBuildResultSource())
+                        && ("FAILED".equals(run.getStatus()) || "CANCELLED".equals(run.getStatus()));
+                if (!observedFailure || !terminal(request.status())) return toRun(run);
+            }
+        }
         LocalDateTime timestamp = now();
         if (create) {
             run = new CicdPipelineRunEntity();
@@ -200,9 +261,13 @@ public class CicdService {
             run.setDeployStatus("NOT_STARTED");
         }
         boolean firstSuccessfulEvent = !"SUCCEEDED".equals(run.getStatus()) && "SUCCEEDED".equals(request.status());
+        boolean resumeApproval = "AWAITING_APPROVAL".equals(run.getDeployStatus()) && "SUCCEEDED".equals(request.status());
         run.setCommitSha(request.commitSha().toLowerCase());
         run.setBranchName(request.branchName());
         run.setStatus(request.status());
+        run.setBuildResultSource("CALLBACK");
+        if (buildOnly) run.setDeployStatus("SUCCEEDED".equals(request.status()) ? "AWAITING_APPROVAL"
+                : "RUNNING".equals(request.status()) ? "BUILDING" : "BUILD_FAILED");
         run.setTestStatus(request.testStatus());
         run.setSecurityStatus(request.securityStatus());
         run.setImageUri(trimToNull(request.imageUri()));
@@ -213,10 +278,17 @@ public class CicdService {
         run.setImageDigest(imageDigest);
         run.setRunUrl(trimToNull(request.runUrl()));
         run.setSummary(trimToNull(request.summary()));
+        run.setBuildExternalRunId(request.buildExternalRunId());
+        run.setApprovalActor(request.approvalActor());
+        run.setManualApprovalId(request.manualApprovalId());
+        run.setApprovedAt(request.approvedAt() == null ? null : LocalDateTime.ofInstant(request.approvedAt(), ZoneOffset.UTC));
         run.setCompletedAt(terminal(request.status()) ? timestamp : null);
         run.setUpdatedAt(timestamp);
         if (create) pipelineMapper.insert(run); else pipelineMapper.updateById(run);
-        if (firstSuccessfulEvent && configuration.getAutoDeploy() == 1) {
+        if (buildOnly && terminal(run.getStatus()) && !"SUCCEEDED".equals(run.getStatus())) {
+            automationWebhooks.publishBuildFailure(run, application);
+        }
+        if (!buildOnly && (firstSuccessfulEvent || resumeApproval) && configuration.getAutoDeploy() == 1) {
             deploymentService.requestRelease(configuration, run);
         }
         return toRun(run);
@@ -278,15 +350,31 @@ public class CicdService {
                 entity.getPreviewCallbackSecretCipher() != null,
                 "/api/cicd/webhooks/" + application.getCode(),
                 "/api/cicd/webhooks/" + application.getCode() + "/previews",
-                oneTimeSecret, oneTimePreviewSecret, entity.getUpdatedAt());
+                oneTimeSecret, oneTimePreviewSecret, oneTimeSecret == null ? null : BuildStatusKey.derive(oneTimeSecret), entity.getUpdatedAt());
     }
 
-    private static PipelineRunResponse toRun(CicdPipelineRunEntity run) {
+    private PipelineRunResponse toRun(CicdPipelineRunEntity run) {
+        boolean githubNewer = run.getGithubCheckedAt() != null && (run.getUpdatedAt() == null
+                || !run.getGithubCheckedAt().isBefore(run.getUpdatedAt()));
+        boolean githubActive = githubNewer && "ACTIVE".equals(run.getGithubObservation())
+                && !run.getGithubCheckedAt().isAfter(now())
+                && run.getGithubCheckedAt().plusMinutes(2).isAfter(now());
+        boolean stale = "RUNNING".equals(run.getStatus()) && (run.getUpdatedAt() == null
+                || !run.getUpdatedAt().plus(runningStaleAfter).isAfter(now()));
+        if (githubActive) stale = false;
+        if (githubNewer && !githubActive && "RUNNING".equals(run.getStatus())) stale = true;
+        String observationMessage = stale ? "长时间未收到 CI 终态，当前结果未知。请打开构建任务核对是否仍在执行、已取消或回调失败；修复回调后重新上报。此提示不会触发部署、取消任务或判定构建失败。" : null;
+        if (githubNewer) observationMessage = "GitHub 核对 · " + run.getGithubCheckedAt() + " UTC："
+                + ("ACTIVE".equals(run.getGithubObservation()) && !githubActive
+                    ? "上次记录为排队或运行，但该观察已过期或时间异常。请重新核对任务详情；不能据此判断任务仍在运行或应用在线。"
+                    : GithubObservationGuidance.describe(run.getGithubObservation()));
         return new PipelineRunResponse(run.getId(), run.getApplicationId(), run.getExternalRunId(),
                 run.getCommitSha(), run.getBranchName(), run.getStatus(), run.getTestStatus(),
                 run.getSecurityStatus(), run.getImageUri(), run.getImageDigest(), run.getRunUrl(),
                 run.getSummary(), run.getDeployStatus(), run.getDeployError(), run.getStartedAt(),
-                run.getCompletedAt(), run.getUpdatedAt());
+                run.getCompletedAt(), run.getUpdatedAt(), run.getBuildExternalRunId(), run.getApprovalActor(), run.getApprovedAt(), run.getManualApprovalId(),
+                stale ? "STALE" : terminal(run.getStatus()) ? "TERMINAL_REPORTED" : "LAST_REPORTED",
+                observationMessage);
     }
 
     private ApplicationEntity requireApplication(Long applicationId) {

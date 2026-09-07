@@ -43,7 +43,7 @@ public class OnboardingHttpClient {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 // Upstream bodies and URLs can contain secrets. Never return them to audit/UI logs.
                 throw new RemoteFailure(provider + " " + method + " HTTP " + response.statusCode()
-                        + "；请检查授权范围、资源访问权和平台版本", response.statusCode());
+                        + "；" + failureGuidance(response.statusCode()), response.statusCode());
             }
             return response.body().isBlank() ? json.createObjectNode() : json.readTree(response.body());
         } catch (RemoteFailure exception) {
@@ -54,6 +54,18 @@ public class OnboardingHttpClient {
         } catch (Exception exception) {
             throw new RemoteFailure(provider + " 网络或响应异常；远端可能已执行，请重试以核对现有资源", 0);
         }
+    }
+
+    static String failureGuidance(int status) {
+        return switch (status) {
+            case 401 -> "凭据无效或已失效，请更新凭据后重试当前步骤";
+            case 403 -> "访问被拒绝，请检查授权范围、资源访问权及平台限流提示";
+            case 429 -> "上游 API 请求受限，请等待限流窗口恢复后重试当前步骤；不要反复提交或重新创建资源";
+            case 404 -> "资源不存在或当前凭据不可见，请核对资源地址与访问权限";
+            default -> status >= 500 && status <= 599
+                    ? "上游服务暂时异常，远端可能已执行；恢复后重试当前步骤以核对现有资源"
+                    : "请检查请求配置、授权范围、资源访问权和平台版本";
+        };
     }
 
     public static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20"); }

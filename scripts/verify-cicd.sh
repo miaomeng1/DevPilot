@@ -21,9 +21,9 @@ for path in "${required_files[@]}"; do
 done
 
 grep -q 'needs: \[quality, security\]' .github/workflows/cicd.yml
-grep -q 'needs: \[quality, security, images\]' .github/workflows/cicd.yml
+grep -q 'needs: \[build_started, quality, security, images\]' .github/workflows/cicd.yml
 grep -q 'sha-${GITHUB_SHA::12}' .github/workflows/cicd.yml
-grep -Fq 'CI_IMAGE_URI: ${{ env.IMAGE_PREFIX }}-web' .github/workflows/cicd.yml
+grep -Fq 'IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/devpilot-web' .github/workflows/cicd.yml
 grep -q 'docker/setup-qemu-action@v3' .github/workflows/cicd.yml
 grep -q 'platforms: linux/amd64,linux/arm64' .github/workflows/cicd.yml
 grep -q 'Check immutable image tag' .github/workflows/cicd.yml
@@ -42,7 +42,7 @@ grep -q 'DEV_PILOT_MASTER_KEY does not match' scripts/restore.sh
 grep -q 'limit_except POST' deploy/nginx/callback-only.conf
 grep -q 'return 404' deploy/nginx/callback-only.conf
 bash -n scripts/cicd/notify-devpilot.sh scripts/install.sh scripts/install-agent.sh \
-  scripts/upgrade.sh scripts/uninstall.sh scripts/backup.sh scripts/restore.sh scripts/test-maintenance.sh
+  scripts/upgrade.sh scripts/uninstall.sh scripts/backup.sh scripts/restore.sh scripts/test-maintenance.sh scripts/test-install-upgrade.sh
 
 if grep -RInE '(password|token|secret)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_./+-]{16,}' \
   .github .gitlab-ci.yml .woodpecker deploy/compose.registry.yml \

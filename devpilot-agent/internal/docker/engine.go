@@ -9,13 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 type Snapshot struct {
@@ -60,7 +57,7 @@ type Engine struct {
 }
 
 func NewEngine() (*Engine, error) {
-	engineClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	engineClient, err := client.New(client.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
 	}
@@ -74,33 +71,33 @@ func (e *Engine) Close() error {
 func (e *Engine) Snapshot(ctx context.Context) Snapshot {
 	now := time.Now().UTC()
 	result := Snapshot{CollectedAt: now, Containers: []ContainerSnapshot{}}
-	version, err := e.client.ServerVersion(ctx)
+	version, err := e.client.ServerVersion(ctx, client.ServerVersionOptions{})
 	if err != nil {
 		result.ErrorMessage = truncate(err.Error(), 500)
 		return result
 	}
 	result.Available = true
 	result.EngineVersion = version.Version
-	containers, err := e.client.ContainerList(ctx, container.ListOptions{All: true})
+	containers, err := e.client.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		result.Available = false
 		result.ErrorMessage = truncate(err.Error(), 500)
 		return result
 	}
-	if images, imageErr := e.client.ImageList(ctx, image.ListOptions{All: true}); imageErr == nil {
-		result.Images = len(images)
+	if images, imageErr := e.client.ImageList(ctx, client.ImageListOptions{All: true}); imageErr == nil {
+		result.Images = len(images.Items)
 	}
-	if volumes, volumeErr := e.client.VolumeList(ctx, volume.ListOptions{}); volumeErr == nil {
-		result.Volumes = len(volumes.Volumes)
+	if volumes, volumeErr := e.client.VolumeList(ctx, client.VolumeListOptions{}); volumeErr == nil {
+		result.Volumes = len(volumes.Items)
 	}
-	if networks, networkErr := e.client.NetworkList(ctx, network.ListOptions{}); networkErr == nil {
-		result.Networks = len(networks)
+	if networks, networkErr := e.client.NetworkList(ctx, client.NetworkListOptions{}); networkErr == nil {
+		result.Networks = len(networks.Items)
 	}
-	result.Containers = e.collectContainers(ctx, containers)
+	result.Containers = e.collectContainers(ctx, containers.Items)
 	// Swarm publishes ports on the service, not on individual task containers.
 	// Workers without manager permissions retain their container-level inventory.
-	if services, serviceErr := e.client.ServiceList(ctx, swarm.ServiceListOptions{}); serviceErr == nil {
-		appendSwarmPorts(result.Containers, services)
+	if services, serviceErr := e.client.ServiceList(ctx, client.ServiceListOptions{}); serviceErr == nil {
+		appendSwarmPorts(result.Containers, services.Items)
 	}
 	return result
 }
@@ -124,15 +121,19 @@ func appendSwarmPorts(containers []ContainerSnapshot, services []swarm.Service) 
 func (e *Engine) Execute(ctx context.Context, containerID, action string) error {
 	switch strings.ToUpper(action) {
 	case "START":
-		return e.client.ContainerStart(ctx, containerID, container.StartOptions{})
+		_, err := e.client.ContainerStart(ctx, containerID, client.ContainerStartOptions{})
+		return err
 	case "STOP":
 		timeout := 10
-		return e.client.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+		_, err := e.client.ContainerStop(ctx, containerID, client.ContainerStopOptions{Timeout: &timeout})
+		return err
 	case "RESTART":
 		timeout := 10
-		return e.client.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
+		_, err := e.client.ContainerRestart(ctx, containerID, client.ContainerRestartOptions{Timeout: &timeout})
+		return err
 	case "REMOVE":
-		return e.client.ContainerRemove(ctx, containerID, container.RemoveOptions{RemoveVolumes: false, Force: false})
+		_, err := e.client.ContainerRemove(ctx, containerID, client.ContainerRemoveOptions{RemoveVolumes: false, Force: false})
+		return err
 	default:
 		return fmt.Errorf("unsupported Docker action %q", action)
 	}
@@ -143,11 +144,12 @@ func (e *Engine) StreamLogs(ctx context.Context, containerID string, lines int, 
 	if lines != 500 {
 		lines = 100
 	}
-	inspect, err := e.client.ContainerInspect(ctx, containerID)
+	inspection, err := e.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
 	if err != nil {
 		return fmt.Errorf("inspect container for logs: %w", err)
 	}
-	stream, err := e.client.ContainerLogs(ctx, containerID, container.LogsOptions{
+	inspect := inspection.Container
+	stream, err := e.client.ContainerLogs(ctx, containerID, client.ContainerLogsOptions{
 		ShowStdout: true, ShowStderr: true, Timestamps: true, Follow: follow, Tail: fmt.Sprint(lines),
 	})
 	if err != nil {
@@ -256,18 +258,19 @@ func (e *Engine) collectContainer(ctx context.Context, summary container.Summary
 	snapshot.RuntimeKey = runtimeKey(summary.Labels, snapshot.Name)
 	if summary.NetworkSettings != nil {
 		for _, endpoint := range summary.NetworkSettings.Networks {
-			if endpoint != nil && endpoint.IPAddress != "" {
-				snapshot.IPAddress = endpoint.IPAddress
+			if endpoint != nil && endpoint.IPAddress.IsValid() {
+				snapshot.IPAddress = endpoint.IPAddress.String()
 				break
 			}
 		}
 	}
-	inspect, inspectErr := e.client.ContainerInspect(ctx, summary.ID)
-	if inspectErr == nil && inspect.ContainerJSONBase != nil {
+	inspection, inspectErr := e.client.ContainerInspect(ctx, summary.ID, client.ContainerInspectOptions{})
+	inspect := inspection.Container
+	if inspectErr == nil {
 		snapshot.RestartCount = inspect.RestartCount
 		if inspect.State != nil {
 			if inspect.State.Health != nil {
-				snapshot.Health = inspect.State.Health.Status
+				snapshot.Health = string(inspect.State.Health.Status)
 			}
 			if parsed, err := time.Parse(time.RFC3339Nano, inspect.State.StartedAt); err == nil && !parsed.IsZero() {
 				parsed = parsed.UTC()
@@ -290,7 +293,7 @@ func (e *Engine) collectContainer(ctx context.Context, summary container.Summary
 		}
 	}
 	if summary.State == container.StateRunning {
-		stats, statsErr := e.client.ContainerStatsOneShot(ctx, summary.ID)
+		stats, statsErr := e.client.ContainerStats(ctx, summary.ID, client.ContainerStatsOptions{})
 		if statsErr == nil {
 			defer stats.Body.Close()
 			var payload container.StatsResponse
@@ -337,8 +340,8 @@ func formatPorts(summary container.Summary) []string {
 			ports = append(ports, private)
 			continue
 		}
-		host := port.IP
-		if host == "" {
+		host := port.IP.String()
+		if !port.IP.IsValid() {
 			host = "0.0.0.0"
 		}
 		ports = append(ports, fmt.Sprintf("%s:%d→%s", host, port.PublicPort, private))

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 SERVER_URL=""
 AGENT_TOKEN=""
@@ -46,7 +47,8 @@ esac
 SERVER_URL="${SERVER_URL%/}"
 ARTIFACT="devpilot-agent-linux-${ARCH}"
 TEMP_DIR="$(mktemp -d)"
-trap 'rm -rf -- "$TEMP_DIR"' EXIT
+CONFIG_TEMP=""
+trap 'rm -rf -- "$TEMP_DIR"; if [[ -n "$CONFIG_TEMP" ]]; then rm -f -- "$CONFIG_TEMP"; fi' EXIT
 
 printf 'Downloading DevPilot Agent for linux/%s...\n' "$ARCH"
 curl -fsSL --retry 3 --connect-timeout 10 "${SERVER_URL}/downloads/${ARTIFACT}" -o "${TEMP_DIR}/${ARTIFACT}"
@@ -64,7 +66,11 @@ yaml_quote() {
   printf "'%s'" "$value"
 }
 
-cat >"$CONFIG_PATH" <<EOF
+# Write privately beside the destination, then atomically replace it. Neither a
+# permissive umask nor an existing 0644 file may expose the new Agent token.
+CONFIG_TEMP="$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")"
+chmod 0600 "$CONFIG_TEMP"
+cat >"$CONFIG_TEMP" <<EOF
 server:
   url: $(yaml_quote "$SERVER_URL")
 
@@ -78,7 +84,8 @@ nginx:
   enabled: ${NGINX_ENABLED}
   configPath: $(yaml_quote "$NGINX_CONFIG_PATH")
 EOF
-chmod 0600 "$CONFIG_PATH"
+mv -fT -- "$CONFIG_TEMP" "$CONFIG_PATH"
+CONFIG_TEMP=""
 
 cat >/etc/systemd/system/devpilot-agent.service <<EOF
 [Unit]

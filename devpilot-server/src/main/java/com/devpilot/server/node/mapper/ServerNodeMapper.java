@@ -19,6 +19,9 @@ public interface ServerNodeMapper extends BaseMapper<ServerNodeEntity> {
     @Select("SELECT * FROM server_node WHERE id = #{id} AND deleted = 0")
     ServerNodeEntity selectActiveById(@Param("id") Long id);
 
+    @Select("SELECT * FROM server_node WHERE id = #{id} AND deleted = 0 FOR UPDATE")
+    ServerNodeEntity lockActiveById(@Param("id") Long id);
+
     @Select("SELECT COUNT(*) FROM server_node WHERE deleted = 0")
     long countAllActive();
 

@@ -10,5 +10,7 @@ public record DashboardSummaryResponse(
         long currentAlerts,
         long todayDeployments,
         long storageWarnings,
-        long storageCritical) {
+        long storageCritical,
+        long applicationHealthy,
+        long applicationUnknown) {
 }

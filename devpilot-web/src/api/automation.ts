@@ -1,6 +1,6 @@
 import { apiClient, type ApiResponse } from './client'
 
-export type AutomationEventType = 'ALERT_FIRING' | 'ALERT_RESOLVED' | 'DEPLOYMENT_HEALTHY' | 'DEPLOYMENT_FAILED'
+export type AutomationEventType = 'ALERT_FIRING' | 'ALERT_RESOLVED' | 'DEPLOYMENT_HEALTHY' | 'DEPLOYMENT_FAILED' | 'BUILD_FAILED' | 'ROLLBACK_HEALTHY' | 'ROLLBACK_FAILED'
 export interface AutomationWebhook { id: string; name: string; endpointHost: string; eventTypes: AutomationEventType[]; enabled: boolean; createdAt: string; updatedAt: string }
 export interface AutomationDelivery { id: string; eventId: string; subscriptionName: string; eventType: AutomationEventType; subject: string; status: string; attemptCount: number; responseCode: number | null; errorMessage: string | null; sentAt: string | null; createdAt: string; updatedAt: string }
 

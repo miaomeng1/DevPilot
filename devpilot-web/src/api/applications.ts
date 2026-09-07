@@ -17,6 +17,9 @@ export interface Application {
   containerId: string | null
   containerName: string | null
   dockerImage: string | null
+  agentStatus?: string
+  containerObservedAt?: string | null
+  runtimeObservationMessage?: string | null
   containerIpAddress: string | null
   ports: string[]
   currentVersion: string | null
@@ -35,6 +38,7 @@ export interface Application {
 }
 
 export interface ApplicationPayload {
+  requestId?: string
   name: string
   code?: string
   description: string

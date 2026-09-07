@@ -31,6 +31,7 @@ export interface CicdConfiguration {
   callbackUrl: string
   previewCallbackUrl: string
   oneTimeCallbackSecret: string | null
+  oneTimeBuildCallbackSecret: string | null
   oneTimePreviewCallbackSecret: string | null
   updatedAt: string
 }
@@ -57,6 +58,8 @@ export interface CicdConfigurationPayload {
 }
 
 export interface PipelineRun {
+  observationStatus: 'STALE' | 'TERMINAL_REPORTED' | 'LAST_REPORTED'
+  observationMessage: string | null
   id: string
   applicationId: string
   externalRunId: string
@@ -69,7 +72,11 @@ export interface PipelineRun {
   imageDigest: string | null
   runUrl: string | null
   summary: string | null
-  deployStatus: 'NOT_STARTED' | 'QUEUED' | 'TRIGGERING' | 'TRIGGERED' | 'HEALTHY' | 'HEALTH_FAILED' | 'FAILED'
+  deployStatus: 'NOT_STARTED' | 'QUEUED' | 'TRIGGERING' | 'TRIGGERED' | 'HEALTHY' | 'HEALTH_FAILED' | 'FAILED' | 'BUILDING' | 'BUILD_FAILED' | 'AWAITING_APPROVAL'
+  buildExternalRunId: string | null
+  approvalActor: string | null
+  approvedAt: string | null
+  manualApprovalId: string | null
   deployError: string | null
   startedAt: string
   completedAt: string | null
@@ -87,7 +94,7 @@ export interface CicdDeployment {
   provider: DeploymentProvider
   imageUri: string
   previousImageUri: string | null
-  status: 'TRIGGERING' | 'TRIGGERED' | 'VERIFYING' | 'HEALTHY' | 'UNHEALTHY' | 'FAILED' | 'ROLLBACK_TRIGGERED'
+  status: 'TRIGGERING' | 'TRIGGERED' | 'VERIFYING' | 'HEALTHY' | 'UNHEALTHY' | 'FAILED' | 'ROLLBACK_TRIGGERED' | 'ROLLED_BACK' | 'ROLLBACK_FAILED'
   providerDeploymentId: string | null
   logs: string | null
   startedAt: string

@@ -31,7 +31,10 @@ public class AuditLogService {
             entity.setResourceType(record.resourceType());
             entity.setResourceId(truncate(record.resourceId(), 100));
             entity.setResourceName(truncate(record.resourceName(), 255));
-            entity.setServerId(record.serverId());
+            // Denied/invalid requests can name a nonexistent server; keep their textual
+            // resource ID without dropping the whole audit event on a foreign-key error.
+            entity.setServerId(record.serverId() != null && serverMapper.selectActiveById(record.serverId()) != null
+                    ? record.serverId() : null);
             entity.setIpAddress(truncate(record.ipAddress(), 64));
             entity.setRequestParams(truncate(record.requestParams(), 4000));
             entity.setResult(record.success() ? "SUCCESS" : "FAILED");

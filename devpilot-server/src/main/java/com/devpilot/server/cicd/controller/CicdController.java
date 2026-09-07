@@ -43,6 +43,35 @@ public class CicdController {
     private final ApplicationEnvironmentService environmentService;
     private final CicdReadinessService readinessService;
     private final CicdPreviewService previewService;
+    private final com.devpilot.server.cicd.service.ManualReleaseApprovalService manualApprovals;
+
+    @GetMapping("/applications/{applicationId}/builds/{buildId}/approval-context")
+    @PreAuthorize("hasAnyRole('ADMIN','DEVELOPER')")
+    public ApiResponse<com.devpilot.server.cicd.service.ManualReleaseApprovalService.Context> approvalContext(
+            @PathVariable Long applicationId, @PathVariable Long buildId) {
+        return ApiResponse.success(manualApprovals.context(applicationId, buildId));
+    }
+
+    @DeleteMapping("/applications/{applicationId}/release-approvals/{approvalId}")
+    @PreAuthorize("hasAnyRole('ADMIN','DEVELOPER')")
+    public ApiResponse<com.devpilot.server.cicd.service.ManualReleaseApprovalService.Approval> revokeApproval(
+            @PathVariable Long applicationId, @PathVariable java.util.UUID approvalId) {
+        return ApiResponse.success(manualApprovals.revoke(applicationId, approvalId.toString()));
+    }
+
+    @GetMapping("/applications/{applicationId}/release-approvals")
+    public ApiResponse<List<com.devpilot.server.cicd.service.ManualReleaseApprovalService.Approval>> approvals(@PathVariable Long applicationId) {
+        return ApiResponse.success(manualApprovals.list(applicationId));
+    }
+
+    @PostMapping("/applications/{applicationId}/builds/{buildId}/approval")
+    @PreAuthorize("hasAnyRole('ADMIN','DEVELOPER')")
+    public ApiResponse<com.devpilot.server.cicd.service.ManualReleaseApprovalService.Approval> approveBuild(
+            @PathVariable Long applicationId, @PathVariable Long buildId,
+            @Valid @RequestBody com.devpilot.server.cicd.service.ManualReleaseApprovalService.Request request,
+            @AuthenticationPrincipal DevPilotPrincipal principal) {
+        return ApiResponse.success(manualApprovals.approve(applicationId, buildId, request, principal));
+    }
 
     @GetMapping("/configurations/{applicationId}")
     public ApiResponse<CicdConfigurationResponse> configuration(@PathVariable Long applicationId) {
@@ -144,6 +173,12 @@ public class CicdController {
             @RequestHeader(value = "X-DevPilot-Signature", required = false) String signature,
             @RequestBody byte[] body) {
         return ApiResponse.success(cicdService.receive(applicationCode, signature, body));
+    }
+
+    @PostMapping("/webhooks/{applicationCode}/builds")
+    public ApiResponse<PipelineRunResponse> buildCallback(@PathVariable String applicationCode,
+            @RequestHeader(value = "X-DevPilot-Signature", required = false) String signature, @RequestBody byte[] body) {
+        return ApiResponse.success(cicdService.receiveBuild(applicationCode, signature, body));
     }
 
     @PostMapping("/webhooks/{applicationCode}/previews")

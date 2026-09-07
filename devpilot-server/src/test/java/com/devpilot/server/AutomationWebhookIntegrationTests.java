@@ -110,7 +110,7 @@ class AutomationWebhookIntegrationTests {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"name":"Local receiver","endpointUrl":"http://127.0.0.1:%d/hook",
-                                 "eventTypes":["ALERT_FIRING","DEPLOYMENT_FAILED"]}
+                                 "eventTypes":["ALERT_FIRING","DEPLOYMENT_FAILED","BUILD_FAILED","ROLLBACK_HEALTHY","ROLLBACK_FAILED"]}
                                 """.formatted(receiver.getAddress().getPort())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.oneTimeSecret", startsWith("dpwhsec_")))
@@ -156,6 +156,183 @@ class AutomationWebhookIntegrationTests {
                         .content("{\"name\":\"Unsafe\",\"endpointUrl\":\"http://example.com/hook\",\"eventTypes\":[\"ALERT_FIRING\"]}"))
                 .andExpect(status().isBadRequest());
         assertTrue(jdbcTemplate.queryForObject("SELECT endpoint_url_encrypted FROM automation_webhook_subscription LIMIT 1", String.class).startsWith("v1:"));
+        var application = new com.devpilot.server.application.entity.ApplicationEntity();
+        application.setId(7001L);
+        application.setServerId(9001L);
+        application.setName("Demo");
+        application.setEnvironment("PRODUCTION");
+        var deployment = new com.devpilot.server.cicd.entity.CicdDeploymentEntity();
+        deployment.setId(6001L);
+        deployment.setApplicationId(7001L);
+        deployment.setDeploymentKind("ROLLBACK");
+        deployment.setStatus("HEALTHY");
+        webhookService.publishDeployment(deployment, application, true);
+        deliveryService.deliverPending();
+        event = objectMapper.readTree(body.get());
+        assertEquals("dev.devpilot.rollback.healthy.v1", event.path("type").asText());
+        assertEquals("PRODUCTION", event.path("data").path("environment").asText());
+        assertEquals("sha256=" + hmac(secret, body.get()), signature.get());
+        deployment.setId(6002L);
+        deployment.setStatus("UNHEALTHY");
+        webhookService.publishDeployment(deployment, application, false);
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE event_type='ROLLBACK_FAILED'", Integer.class));
+    }
+
+    @Test
+    void failedDeliveryCanRetryWithoutChangingEventAndSuccessfulDeliveryCannotReplay() throws Exception {
+        var responseCode = new java.util.concurrent.atomic.AtomicInteger(503);
+        var received = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var identities = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var sending = new java.util.concurrent.CountDownLatch(1);
+        var releaseResponse = new java.util.concurrent.CountDownLatch(1);
+        receiver = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        receiver.createContext("/retry", exchange -> {
+            received.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            identities.add(exchange.getRequestHeaders().getFirst("X-DevPilot-Delivery"));
+            if (responseCode.get() == 204) {
+                sending.countDown();
+                try { releaseResponse.await(5, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            }
+            exchange.sendResponseHeaders(responseCode.get(), -1);
+            exchange.close();
+        });
+        receiver.start();
+        String admin = setupAdministrator();
+        mockMvc.perform(post("/api/automation/webhooks").header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)
+                .contentType(MediaType.APPLICATION_JSON).content("""
+                {"name":"Retry receiver","endpointUrl":"http://127.0.0.1:%d/retry","eventTypes":["ALERT_FIRING"]}
+                """.formatted(receiver.getAddress().getPort()))).andExpect(status().isOk());
+        var alert = new AlertEventEntity();
+        alert.setId(8002L); alert.setServerId(9001L); alert.setResourceType("SERVER");
+        alert.setResourceId("9001"); alert.setResourceName("edge-1"); alert.setSeverity("CRITICAL");
+        alert.setStatus("FIRING"); alert.setMessage("Offline fixture");
+        webhookService.publishAlert(alert, "FIRING");
+        deliveryService.deliverPending();
+        Long id = jdbcTemplate.queryForObject("SELECT id FROM automation_webhook_delivery", Long.class);
+        assertEquals("FAILED", jdbcTemplate.queryForObject("SELECT status FROM automation_webhook_delivery", String.class));
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT attempt_count FROM automation_webhook_delivery", Integer.class));
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE sent_at IS NULL AND next_attempt_at > updated_at", Integer.class));
+        deliveryService.deliverPending();
+        assertEquals(1, received.size(), "Not-yet-due failures must not be sent immediately again");
+        java.util.function.Supplier<Integer> retry = () -> {
+            try { return mockMvc.perform(post("/api/automation/webhooks/deliveries/{id}/retry", id)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)).andReturn().getResponse().getStatus(); }
+            catch (Exception exception) { throw new RuntimeException(exception); }
+        };
+        var firstRetry = java.util.concurrent.CompletableFuture.supplyAsync(retry);
+        var secondRetry = java.util.concurrent.CompletableFuture.supplyAsync(retry);
+        assertEquals(java.util.Set.of(200, 409), java.util.Set.of(
+                firstRetry.get(10, java.util.concurrent.TimeUnit.SECONDS), secondRetry.get(10, java.util.concurrent.TimeUnit.SECONDS)));
+        mockMvc.perform(post("/api/automation/webhooks/deliveries/{id}/retry", id)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)).andExpect(status().isConflict());
+        responseCode.set(204);
+        var worker = java.util.concurrent.CompletableFuture.runAsync(deliveryService::deliverPending);
+        try {
+            assertTrue(sending.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals("SENDING", jdbcTemplate.queryForObject("SELECT status FROM automation_webhook_delivery", String.class));
+            assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE claim_token IS NOT NULL AND claim_expires_at IS NOT NULL AND response_code IS NULL AND error_message IS NULL AND sent_at IS NULL", Integer.class));
+            deliveryService.deliverPending();
+            assertEquals(2, received.size(), "A second worker cannot send a claimed delivery");
+            mockMvc.perform(post("/api/automation/webhooks/deliveries/{id}/retry", id)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)).andExpect(status().isConflict());
+        } finally { releaseResponse.countDown(); }
+        worker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertEquals(2, received.size());
+        assertEquals(received.getFirst(), received.getLast());
+        assertEquals(identities.getFirst(), identities.getLast());
+        assertEquals("SUCCEEDED", jdbcTemplate.queryForObject("SELECT status FROM automation_webhook_delivery", String.class));
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE sent_at IS NOT NULL AND response_code=204 AND error_message IS NULL", Integer.class));
+        mockMvc.perform(post("/api/automation/webhooks/deliveries/{id}/retry", id)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)).andExpect(status().isConflict());
+        deliveryService.deliverPending();
+        assertEquals(2, received.size());
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery", Integer.class));
+        // Simulate process death after claiming, without waiting five wall-clock minutes.
+        jdbcTemplate.update("UPDATE automation_webhook_delivery SET status='SENDING',claim_token='lost-worker',claim_expires_at=?,attempt_count=4,sent_at=NULL",
+                LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(1));
+        deliveryService.deliverPending();
+        assertEquals(3, received.size());
+        assertEquals(identities.getFirst(), identities.getLast());
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE status='SUCCEEDED' AND attempt_count=5 AND claim_token IS NULL", Integer.class));
+        jdbcTemplate.update("UPDATE automation_webhook_delivery SET status='SENDING',claim_token='last-lost-worker',claim_expires_at=?,sent_at=NULL",
+                LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(1));
+        deliveryService.deliverPending();
+        assertEquals(3, received.size(), "Expired fifth claim cannot retry automatically without limit");
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE status='FAILED' AND attempt_count=5 AND claim_token IS NULL AND error_message LIKE '%outcome unknown%'", Integer.class));
+    }
+
+    @Test
+    void lateSuccessCannotOverwriteNewLeaseFailure() throws Exception {
+        var oldRequestEntered = new java.util.concurrent.CountDownLatch(1);
+        var releaseOldRequest = new java.util.concurrent.CountDownLatch(1);
+        var newRequestEntered = new java.util.concurrent.CountDownLatch(1);
+        var releaseNewRequest = new java.util.concurrent.CountDownLatch(1);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var bodies = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        receiver = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        receiver.setExecutor(executor);
+        receiver.createContext("/late", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            int index = calls.incrementAndGet();
+            if (index == 1) {
+                oldRequestEntered.countDown();
+                try { releaseOldRequest.await(5, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            } else {
+                newRequestEntered.countDown();
+                try { releaseNewRequest.await(5, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            }
+            exchange.sendResponseHeaders(index == 1 ? 204 : 503, -1);
+            exchange.close();
+        });
+        receiver.start();
+        java.util.concurrent.CompletableFuture<Void> oldWorker = null;
+        java.util.concurrent.CompletableFuture<Void> newWorker = null;
+        try {
+            String admin = setupAdministrator();
+            mockMvc.perform(post("/api/automation/webhooks").header(HttpHeaders.AUTHORIZATION, "Bearer " + admin)
+                    .contentType(MediaType.APPLICATION_JSON).content("""
+                    {"name":"Late receiver","endpointUrl":"http://127.0.0.1:%d/late","eventTypes":["ALERT_FIRING"]}
+                    """.formatted(receiver.getAddress().getPort()))).andExpect(status().isOk());
+            var alert = new AlertEventEntity();
+            alert.setId(8003L); alert.setServerId(9001L); alert.setResourceType("SERVER");
+            alert.setResourceId("9001"); alert.setResourceName("edge-1"); alert.setSeverity("CRITICAL");
+            alert.setStatus("FIRING"); alert.setMessage("Lease fixture");
+            webhookService.publishAlert(alert, "FIRING");
+            oldWorker = java.util.concurrent.CompletableFuture.runAsync(deliveryService::deliverPending);
+            assertTrue(oldRequestEntered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            String oldToken = jdbcTemplate.queryForObject("SELECT claim_token FROM automation_webhook_delivery", String.class);
+            assertTrue(oldToken != null && !oldToken.isBlank());
+            // Model a process pause exceeding the lease, while its HTTP response is still outstanding.
+            jdbcTemplate.update("UPDATE automation_webhook_delivery SET claim_expires_at=?",
+                    LocalDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(1));
+            newWorker = java.util.concurrent.CompletableFuture.runAsync(deliveryService::deliverPending);
+            assertTrue(newRequestEntered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertEquals(2, calls.get());
+            assertEquals(bodies.getFirst(), bodies.getLast());
+            String newToken = jdbcTemplate.queryForObject("SELECT claim_token FROM automation_webhook_delivery", String.class);
+            assertTrue(newToken != null && !newToken.equals(oldToken));
+            var newerResult = jdbcTemplate.queryForMap("SELECT status,attempt_count,response_code,error_message,sent_at,next_attempt_at,updated_at,claim_token FROM automation_webhook_delivery");
+            releaseOldRequest.countDown();
+            oldWorker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(newerResult, jdbcTemplate.queryForMap("SELECT status,attempt_count,response_code,error_message,sent_at,next_attempt_at,updated_at,claim_token FROM automation_webhook_delivery"),
+                    "Late HTTP success must not rewrite the newer worker's result or retry schedule");
+            assertEquals("SENDING", jdbcTemplate.queryForObject("SELECT status FROM automation_webhook_delivery", String.class));
+            releaseNewRequest.countDown();
+            newWorker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(1, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM automation_webhook_delivery WHERE status='FAILED' AND attempt_count=2 AND response_code=503 AND sent_at IS NULL AND claim_token IS NULL", Integer.class));
+        } finally {
+            releaseOldRequest.countDown();
+            releaseNewRequest.countDown();
+            try {
+                if (oldWorker != null) oldWorker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                if (newWorker != null) newWorker.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            finally { executor.shutdownNow(); }
+        }
     }
 
     private String setupAdministrator() throws Exception {

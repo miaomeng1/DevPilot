@@ -15,6 +15,7 @@ const router = createRouter({
       path: '/',
       component: () => import('@/layouts/AppLayout.vue'),
       children: [
+        { path: 'setup', name: 'platform-setup', component: () => import('@/views/SetupView.vue'), meta: { title: '初始化向导', roles: ['ADMIN'] } },
         {
           path: '',
           name: 'dashboard',

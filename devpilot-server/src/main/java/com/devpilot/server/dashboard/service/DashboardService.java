@@ -32,11 +32,12 @@ public class DashboardService {
                 && server.current().diskUsage() >= 90.0).count();
         long storageWarnings = servers.stream().filter(server -> server.current() != null
                 && server.current().diskUsage() >= 80.0 && server.current().diskUsage() < 90.0).count();
+        var appHealth = applicationService.healthSummary();
         DashboardSummaryResponse summary = new DashboardSummaryResponse(
                 serverNodeMapper.countAllActive(), serverNodeMapper.countOnline(),
                 dockerContainerMapper.countAllActive(), dockerContainerMapper.countRunning(),
-                applicationService.count(), applicationService.countUnhealthy(), alertEventService.summary().active(),
-                applicationService.countDeploymentsToday(), storageWarnings, storageCritical);
+                appHealth.total(), appHealth.unhealthy(), alertEventService.summary().active(),
+                applicationService.countDeploymentsToday(), storageWarnings, storageCritical, appHealth.healthy(), appHealth.unknown());
         return new DashboardResponse(summary, range.value(), metricService.globalTrend(range),
                 servers.stream().limit(6).toList(),
                 applicationService.serviceStatuses(), applicationService.recentDeployments(), alertEventService.current(6));

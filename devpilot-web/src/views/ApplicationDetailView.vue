@@ -17,6 +17,7 @@ const containers = ref<DockerContainer[]>([])
 const loading = ref(true)
 const saving = ref(false)
 const errorMessage = ref('')
+const refreshFailed = ref(false)
 const editOpen = ref(false)
 const releaseOpen = ref(false)
 const deleteOpen = ref(false)
@@ -36,7 +37,9 @@ async function load(silent = false) {
     const [detail, history] = await Promise.all([applicationApi.get(id.value), applicationApi.deployments(id.value)])
     application.value = detail
     deployments.value = history
+    refreshFailed.value = false
   } catch (error) {
+    refreshFailed.value = true
     errorMessage.value = apiErrorMessage(error, 'Application could not be loaded')
   } finally {
     loading.value = false
@@ -147,9 +150,11 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
         <div class="application-actions"><span class="status-badge" :class="statusClass(application.status)"><i />{{ application.status }}</span><RouterLink class="application-cicd-link" to="/cicd">发布中心 CI/CD</RouterLink><button v-if="canManage" @click="openEdit">编辑</button><button v-if="canManage" @click="openRelease">手工记录</button><button v-if="canDelete" class="danger-action" @click="deleteConfirmation = ''; deleteOpen = true">删除</button></div>
       </header>
       <p v-if="errorMessage" class="inline-error">{{ errorMessage }}</p>
+      <p v-if="refreshFailed" class="inline-error" role="status">刷新失败，以下运行信息与健康检查来自上次成功读取；请勿将历史状态当作当前状态。</p>
+      <p v-if="application.runtimeObservationMessage" role="status">{{ application.runtimeObservationMessage }}</p>
 
       <div class="application-kpis">
-        <article><span>健康 Health</span><strong :class="`health-${application.healthStatus.toLowerCase()}`">{{ application.healthStatus }}</strong><small>{{ application.healthMessage || '等待 Agent 探测' }}</small></article>
+        <article><span>最近健康检查 Last health check</span><strong :class="`health-${application.healthStatus.toLowerCase()}`">{{ application.healthStatus }}</strong><small>{{ application.healthMessage || '等待 Agent 探测' }} · {{ application.healthCheckedAt || '尚无探测时间' }}</small></article>
         <article><span>当前版本 Version</span><strong>{{ application.currentVersion || '未标记' }}</strong><small>{{ application.dockerImage || '镜像不可用' }}</small></article>
         <article><span>CPU 使用率</span><strong>{{ application.cpuUsage === null ? '—' : `${application.cpuUsage.toFixed(1)}%` }}</strong><small>当前容器采样</small></article>
         <article><span>内存 Memory</span><strong>{{ bytes(application.memoryUsage) }}</strong><small>限制 {{ bytes(application.memoryLimit) }}</small></article>
@@ -158,6 +163,8 @@ onBeforeUnmount(() => window.clearInterval(pollTimer))
       <div class="application-detail-grid">
         <article class="detail-panel application-facts"><header><div><strong>服务与运行时 Service runtime</strong><small>镜像、容器、网络入口和健康检查关联</small></div><span>DOCKER</span></header><dl>
           <div><dt>服务器 Server</dt><dd><RouterLink :to="`/servers/${application.serverId}`">{{ application.serverName }}</RouterLink></dd></div>
+          <div><dt>Agent 状态</dt><dd>{{ application.agentStatus || 'UNKNOWN' }}</dd></div>
+          <div><dt>容器采集时间 UTC</dt><dd>{{ application.containerObservedAt || '尚无上报' }}</dd></div>
           <div><dt>容器 Container</dt><dd><RouterLink v-if="application.containerSnapshotId" :to="`/docker/containers/${application.containerSnapshotId}`">{{ application.containerName }}</RouterLink><span v-else>不可用</span></dd></div>
           <div><dt>环境 Environment</dt><dd>{{ application.environment }}</dd></div><div><dt>容器 IP</dt><dd>{{ application.containerIpAddress || '—' }}</dd></div>
           <div class="wide"><dt>运行端口 Ports</dt><dd class="application-port-list"><code v-for="port in application.ports" :key="port">{{ port }}</code><span v-if="!application.ports.length">未发现公开端口</span></dd></div>

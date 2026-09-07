@@ -79,7 +79,33 @@ Traefik / Nginx
 
 ## 快速开始 Quick Start
 
-要求：Docker Engine、Docker Compose v2，建议至少保留 2 GB 可用内存。
+当前处于个人稳定版候选验收阶段，尚未交付正式 Release；本地最新改动也不等于已经提交到 GitHub。不要把示例 `1.0.0`、本机 Registry 地址或验收标签当成可公开拉取的正式发行制品。最新证据与未完成项见 [稳定性验收记录](docs/stability-validation.md)。
+
+### 自托管安装（当前源码构建路径）
+
+在 Linux amd64/arm64 服务器上使用 Docker Engine 和 Compose v2。测试 VM 为 2 核 / 4 GB，安装盘至少留 5 GiB；构建镜像还需额外磁盘与内存，资源有限时可在同架构构建机完成后导入。先确认 UTC / NTP 正常，具体要求见 [部署指南](docs/deployment.md)。
+
+取得你准备使用的代码版本后，从项目根目录执行：
+
+```bash
+docker build -t devpilot/server:local -f devpilot-server/Dockerfile devpilot-server
+docker build -t devpilot/web:local -f devpilot-web/Dockerfile .
+docker pull mysql:8.4
+docker pull redis:7.4-alpine
+docker pull nginx:1.29-alpine
+sudo bash scripts/install.sh --offline \
+  --server-image devpilot/server:local \
+  --web-image devpilot/web:local \
+  --port 8080 --public-url http://YOUR_SERVER_IP:8080
+```
+
+将 `YOUR_SERVER_IP` 替换为实际可达地址。此处 `--offline` 仅表示安装阶段不拉镜像；前面的源码构建/拉取仍需网络。root 与构建用户须连接同一个本机 Docker daemon。安装器会生成独立密钥，保存到 `/opt/devpilot/.env`，并等待服务健康；打开输出地址创建首个管理员。不要手动复制示例密钥，不要向已有安装目录重复安装。
+
+后续备份、升级与恢复使用这套安装器管理的目录；升级要求可以拉取的不可变 digest，不能把本地 `:local` 标签直接当作升级参数。详见 [安装与维护](docs/deployment.md)。源码变更后必须重新构建制品，旧运行镜像不会自动更新。
+
+### 源码开发启动（另一种目录布局）
+
+下面保留源码 Compose 路径，适合开发与调试。它使用仓库内 `.env` 和 Compose 配置，不自动变成 `/opt/devpilot` 安装器布局；不能直接套用默认维护命令或在同一 Docker daemon 上再安装第二套同名 `devpilot` 项目。
 
 ```bash
 git clone https://github.com/miaomeng1/DevPilot.git
@@ -108,7 +134,7 @@ AUTH_COOKIE_SECURE=true
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
-打开 `http://localhost:8080` 或配置的域名，创建首个管理员账号。
+在运行 Docker 的主机打开 `http://localhost:8080`，其他电脑使用配置的服务器地址或域名，创建首个管理员账号。
 
 不要把 `.env`、API Token、Webhook Secret、JWT Secret 或 Master Key 提交到 Git。
 
@@ -135,6 +161,8 @@ Web 镜像在 `/downloads/` 提供带校验和的 amd64 / arm64 Agent 二进制�
 9. 生产审批通过后，DevPilot 触发部署、执行健康验证并在失败时回滚。
 
 详细配置见 [CI/CD 指南](docs/cicd.md)。
+
+本仓库的三组件镜像构建与可选 Web 演示发布见 [平台自身流水线](docs/platform-workflow.md)；Web 演示发布不等于整套 DevPilot 平台升级。
 
 ## 一键安装个人服务
 
@@ -213,6 +241,7 @@ cd devpilot-agent && go test ./...
 - [系统架构](docs/architecture.md)
 - [部署指南](docs/deployment.md)
 - [CI/CD 指南](docs/cicd.md)
+- [GitHub 状态核对与回调排查](docs/github-observation.md)
 - [个人服务模板](docs/service-templates.md)
 - [通知路由与维护窗口](docs/alert-routing.md)
 - [容量与部署建议](docs/capacity-planning.md)

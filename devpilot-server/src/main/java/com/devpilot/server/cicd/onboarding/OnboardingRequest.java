@@ -8,8 +8,8 @@ public record OnboardingRequest(
         @NotBlank @Size(max = 1000) String repositoryUrl,
         @NotBlank @Size(max = 4000) String repositoryToken,
         @NotBlank @Pattern(regexp = "COOLIFY|DOKPLOY") String deploymentProvider,
-        @NotBlank @Size(max = 1000) String providerBaseUrl,
-        @NotBlank @Size(max = 4000) String providerApiToken,
+        @Size(max = 1000) String providerBaseUrl,
+        @Size(max = 4000) String providerApiToken,
         @Size(max = 255) String projectId,
         @Size(max = 255) String environmentId,
         @Size(max = 255) String providerServerId,
@@ -23,6 +23,8 @@ public record OnboardingRequest(
         @Size(max = 255) String registryUsername,
         @Size(max = 4000) String registryPassword,
         @Size(max = 100) Map<@Pattern(regexp = "[A-Za-z_][A-Za-z0-9_]*") String, @Size(max = 4000) String> environmentValues,
-        Boolean providerQuotaConfirmed) {
+        Boolean providerQuotaConfirmed,
+        Boolean usePlatformConnection,
+        @Size(max = 36) String platformRevision) {
     @Override public String toString() { return "OnboardingRequest[REDACTED]"; }
 }

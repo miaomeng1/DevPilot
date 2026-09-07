@@ -178,6 +178,7 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
     }
 
     private static String resourceType(String path) {
+        if (path.equals("/api/setup") || path.startsWith("/api/setup/")) return "PLATFORM_SETUP";
         if (path.startsWith("/api/servers")) return "SERVER";
         if (path.startsWith("/api/docker")) return "CONTAINER";
         if (path.startsWith("/api/applications")) return "APPLICATION";
@@ -197,12 +198,17 @@ public class AuditCaptureFilter extends OncePerRequestFilter {
     }
 
     private static String action(String method, String path) {
+        if (path.equals("/api/setup") && "PUT".equals(method)) return "UPDATE_PLATFORM_SETUP";
+        if (path.equals("/api/setup/verify-provider") && "POST".equals(method)) return "VERIFY_PLATFORM_PROVIDER";
         if (path.equals("/api/auth/setup")) return "INITIALIZE_SYSTEM";
         if (path.equals("/api/auth/login")) return "LOGIN";
         if (path.equals("/api/auth/logout")) return "LOGOUT";
         if (path.equals("/api/auth/password")) return "CHANGE_PASSWORD";
         if (path.matches("/api/servers/\\d+") && "DELETE".equals(method)) return "DELETE_SERVER";
         if (path.equals("/api/servers") && "POST".equals(method)) return "ADD_SERVER";
+        if (path.matches("/api/cicd/applications/\\d+/builds/\\d+/approval") && "POST".equals(method)) return "APPROVE_BUILD_RELEASE";
+        if (path.matches("/api/cicd/applications/\\d+/release-approvals/[0-9a-fA-F-]+") && "DELETE".equals(method)) return "REVOKE_BUILD_APPROVAL";
+        if (path.matches("/api/servers/\\d+/registration") && "POST".equals(method)) return "RENEW_AGENT_TOKEN";
         if (path.matches(".*/containers/\\d+/start")) return "START_CONTAINER";
         if (path.matches(".*/containers/\\d+/stop")) return "STOP_CONTAINER";
         if (path.matches(".*/containers/\\d+/restart")) return "RESTART_CONTAINER";

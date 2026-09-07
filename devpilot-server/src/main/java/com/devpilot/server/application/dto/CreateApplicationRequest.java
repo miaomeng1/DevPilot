@@ -14,5 +14,6 @@ public record CreateApplicationRequest(
         Long containerSnapshotId,
         @Size(max = 120) String currentVersion,
         @Size(max = 1000) String healthCheckUrl,
-        @Size(max = 1000) String accessUrl) {
+        @Size(max = 1000) String accessUrl,
+        @Pattern(regexp = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}") String requestId) {
 }

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 )
 
 func TestLineWriterFramesPartialLines(t *testing.T) {
@@ -62,7 +62,7 @@ func TestServiceTemplateSecurityDefaults(t *testing.T) {
 			t.Fatalf("template %s missing pinned image or ownership label", templateID)
 		}
 		for _, bindings := range hostConfig.PortBindings {
-			if len(bindings) != 1 || bindings[0].HostIP != "127.0.0.1" || bindings[0].HostPort != "12345" {
+			if len(bindings) != 1 || bindings[0].HostIP.String() != "127.0.0.1" || bindings[0].HostPort != "12345" {
 				t.Fatalf("template %s has unsafe port binding: %#v", templateID, bindings)
 			}
 		}
