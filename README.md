@@ -79,7 +79,17 @@ Traefik / Nginx
 
 ## 快速开始 Quick Start
 
-当前处于个人稳定版候选验收阶段，尚未交付正式 Release；本地最新改动也不等于已经提交到 GitHub。不要把示例 `1.0.0`、本机 Registry 地址或验收标签当成可公开拉取的正式发行制品。最新证据与未完成项见 [稳定性验收记录](docs/stability-validation.md)。
+### 发行包安装（推荐）
+
+从 [GitHub Releases](https://github.com/miaomeng1/DevPilot/releases) 下载对应版本的 `DevPilot-VERSION.tar.gz` 和校验文件，核验并解压后，按包内 `QUICK_START.md` 执行：
+
+```bash
+sudo bash install-release.sh --port 8080 --public-url http://YOUR_SERVER_IP:8080
+```
+
+发行包包含源代码、维护脚本、固定镜像 digest 的安装入口、`release.json`、双架构镜像扫描报告和 Java SBOM。私有 GHCR 镜像需先配置具有读取权限的 Registry 登录；**公开源代码不代表所有镜像公开**。实际发行状态、验收报告和限制以 Release 为准，不要使用示例镜像名或本机 Registry 地址代替发行清单。
+
+首要验收链路为 GitHub Actions + GHCR + Dokploy；Linux amd64/arm64 制品均构建和扫描，真实主机验收使用 Ubuntu 24.04 ARM64。GitLab/Coolify 保持兼容但不宣称真实验收完成。历史逐次记录见 [稳定性验收记录](docs/stability-validation.md)。
 
 ### 自托管安装（当前源码构建路径）
 
@@ -150,15 +160,16 @@ Web 镜像在 `/downloads/` 提供带校验和的 amd64 / arm64 Agent 二进制�
 
 ## 接入应用与自动部署
 
-1. 为业务项目准备 `Dockerfile` 和 `/healthz` 健康检查接口。
-2. 在 Dokploy 或 Coolify 创建 Application，配置域名、容器端口和环境变量。
-3. 在 DevPilot 的 **应用 Applications** 中从“自动发现”选择容器，确认预填信息后完成纳管。
-4. DevPilot 会展示镜像、容器 IP 和真实端口映射，并可生成访问与健康检查地址。
-5. 在 **发布 CI/CD** 中配置仓库、受保护分支、部署平台 API 和资源 ID。
-6. 打开 **仓库接入向导**，选择技术栈并复制或下载 GitHub Actions、GitLab CI 或 Woodpecker 配置。
-7. 把向导列出的变量、一次性回调 Secret 与回调 URL 存入 CI 平台的受保护 Secrets。
-8. 推送代码后，CI 自动测试、扫描并构建镜像。
-9. 生产审批通过后，DevPilot 触发部署、执行健康验证并在失败时回滚。
+1. 初始化向导中连接 Dokploy、目标服务器和 Agent，完成连接验证及管理员配额确认。
+2. 为业务项目准备支持的根目录 `Dockerfile`、可执行测试和健康检查接口。
+3. 打开 **发布 CI/CD → 自动接入新项目**，授权仓库并检查默认分支与项目结构。
+4. 确认目标服务器、环境、容器/发布端口、健康路径、变量和私有 Registry 读取凭据。
+5. 向导自动创建或复用支持的部署资源、写入受保护 Secrets，并提交 CI 配置 PR；审阅后合并。
+6. 推送代码后自动测试、扫描、构建镜像；构建成功仅进入“待发布确认”。
+7. 在发布中心确认选定构建，再按页面指引触发发布原 digest，不重新构建。
+8. 等待实际容器和新鲜健康探测通过；失败时查看原因并恢复。自动回滚必须明确开启且存在上一健康版本。
+
+已有容器也可从“自动发现”纳管；手工配置向导作为兼容路径保留。公网 Actions 必须能访问 HTTPS 签名回调地址，不能填写仅本机可达的 localhost；临时隧道只适合验收。
 
 详细配置见 [CI/CD 指南](docs/cicd.md)。
 

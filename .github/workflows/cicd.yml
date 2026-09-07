@@ -72,6 +72,8 @@ jobs:
         run: node --experimental-strip-types scripts/test-github-workflow-lint.mjs
       - name: Test platform release evidence guards
         run: node --experimental-strip-types scripts/test-platform-workflow.mjs
+      - name: Test release packaging evidence guards
+        run: node scripts/test-package-release.mjs
 
   security:
     if: github.event_name != 'workflow_dispatch'
